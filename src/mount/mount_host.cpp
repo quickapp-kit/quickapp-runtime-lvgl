@@ -2,19 +2,28 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string_view>
 #include <type_traits>
+#include <new>
 
 #include <lvgl.h>
 
 #include "quickapp/lvgl/font/system_default_font_asset.h"
 
+// LVGL links its bundled LodePNG decoder, but its public header only exposes
+// decoder registration. Keep this private declaration local to the image host.
+extern "C" unsigned lodepng_decode32(unsigned char** out, unsigned* width,
+                                      unsigned* height, const unsigned char* in,
+                                      std::size_t insize);
+
 namespace quickapp::lvgl::mount {
 namespace {
 
 constexpr std::int32_t kDefaultFontSize = 16;
+constexpr std::size_t kTinyTtfCacheGlyphCount = 2;
 
 using core::RuntimeError;
 using core::RuntimeErrorCode;
@@ -35,6 +44,17 @@ void lookupRoot(void* context, surface::PageRootHandle handle) noexcept {
   state->root = state->lookup->nativeObject(handle);
 }
 
+void resetViewChrome(lv_obj_t* object) noexcept {
+  if (object == nullptr) return;
+  lv_obj_set_style_bg_opa(object, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(object, 0, 0);
+  lv_obj_set_style_outline_width(object, 0, 0);
+  lv_obj_set_style_shadow_width(object, 0, 0);
+  lv_obj_set_style_radius(object, 0, 0);
+  lv_obj_set_style_pad_all(object, 0, 0);
+  lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_OFF);
+}
+
 bool sameNode(const std::optional<core::NodeId>& left,
               const core::NodeId& right) noexcept {
   return left.has_value() && *left == right;
@@ -47,6 +67,184 @@ void onClick(lv_event_t* event) noexcept {
     binding->callback(binding->context, binding->surface_id, binding->node_id,
                       static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL);
   }
+}
+
+void onInput(lv_event_t* event) noexcept {
+  if (event == nullptr) return;
+  auto* binding = static_cast<MountHost::InputBinding*>(lv_event_get_user_data(event));
+  if (binding == nullptr || !binding->live || binding->callback == nullptr) return;
+  const auto code = lv_event_get_code(event);
+  auto type = core::package::EventType::kInput;
+  if (code == LV_EVENT_FOCUSED) type = core::package::EventType::kFocus;
+  else if (code != LV_EVENT_VALUE_CHANGED) return;
+  auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
+  const char* value = target == nullptr ? "" : lv_textarea_get_text(target);
+  const auto timestamp = static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL;
+  binding->callback(binding->context, binding->surface_id, binding->node_id,
+                    type, value == nullptr ? "" : value, timestamp);
+  if (type == core::package::EventType::kInput) {
+    binding->callback(binding->context, binding->surface_id, binding->node_id,
+                      core::package::EventType::kChange,
+                      value == nullptr ? "" : value, timestamp);
+  }
+}
+
+void onSwitch(lv_event_t* event) noexcept {
+  if (event == nullptr || lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) {
+    return;
+  }
+  auto* binding =
+      static_cast<MountHost::SwitchBinding*>(lv_event_get_user_data(event));
+  if (binding == nullptr || !binding->live || binding->callback == nullptr) {
+    return;
+  }
+  auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
+  if (target == nullptr) return;
+  binding->callback(binding->context, binding->surface_id, binding->node_id,
+                    lv_obj_has_state(target, LV_STATE_CHECKED),
+                    static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL);
+}
+
+void onSlider(lv_event_t* event) noexcept {
+  if (event == nullptr || lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) {
+    return;
+  }
+  auto* binding =
+      static_cast<MountHost::SliderBinding*>(lv_event_get_user_data(event));
+  if (binding == nullptr || !binding->live || binding->callback == nullptr) {
+    return;
+  }
+  auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
+  if (target == nullptr || binding->scale <= 0) return;
+  const double native = static_cast<double>(lv_slider_get_value(target));
+  const double raw = native / binding->scale;
+  const double value = std::clamp(
+      binding->minimum +
+          std::round((raw - binding->minimum) / binding->step) * binding->step,
+      binding->minimum, binding->maximum);
+  binding->callback(binding->context, binding->surface_id, binding->node_id,
+                    value, lv_event_get_indev(event) != nullptr,
+                    static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL);
+}
+
+void onPicker(lv_event_t* event) noexcept {
+  if (event == nullptr) return;
+  const auto code = lv_event_get_code(event);
+  if (code != LV_EVENT_VALUE_CHANGED && code != LV_EVENT_CANCEL) return;
+  auto* binding =
+      static_cast<MountHost::PickerBinding*>(lv_event_get_user_data(event));
+  if (binding == nullptr || !binding->live || binding->callback == nullptr) {
+    return;
+  }
+  auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
+  if (target == nullptr) return;
+  std::array<char, kMaxPropertyText> value{};
+  lv_dropdown_get_selected_str(target, value.data(), value.size());
+  const auto selected = static_cast<std::int32_t>(lv_dropdown_get_selected(target));
+  const auto timestamp = static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL;
+  if (code == LV_EVENT_CANCEL) {
+    binding->callback(binding->context, binding->surface_id, binding->node_id,
+                      MountHost::PickerEvent::kCancel, selected, value.data(),
+                      timestamp);
+    return;
+  }
+  binding->callback(binding->context, binding->surface_id, binding->node_id,
+                    MountHost::PickerEvent::kChange, selected, value.data(),
+                    timestamp);
+  binding->callback(binding->context, binding->surface_id, binding->node_id,
+                    MountHost::PickerEvent::kConfirm, selected, value.data(),
+                    timestamp);
+}
+
+void onTabs(lv_event_t* event) noexcept {
+  if (event == nullptr || lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED) {
+    return;
+  }
+  auto* binding =
+      static_cast<MountHost::TabsBinding*>(lv_event_get_user_data(event));
+  if (binding == nullptr || !binding->live || binding->callback == nullptr) {
+    return;
+  }
+  auto* target = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
+  if (target == nullptr) return;
+  const auto index = static_cast<std::int32_t>(lv_tabview_get_tab_active(target));
+  auto* button = lv_tabview_get_tab_button(target, index);
+  auto* label = button == nullptr
+                    ? nullptr
+                    : lv_obj_get_child_by_type(button, 0, &lv_label_class);
+  const char* value = label == nullptr ? "" : lv_label_get_text(label);
+  binding->callback(binding->context, binding->surface_id, binding->node_id,
+                    index, value == nullptr ? "" : value,
+                    static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL);
+}
+
+void onScroll(lv_event_t* event) noexcept {
+  if (event == nullptr) return;
+  const auto code = lv_event_get_code(event);
+  core::package::EventType type{};
+  if (code == LV_EVENT_SCROLL) {
+    type = core::package::EventType::kScroll;
+  } else if (code == LV_EVENT_SCROLL_END) {
+    type = core::package::EventType::kScrollEnd;
+  } else {
+    return;
+  }
+  auto* binding =
+      static_cast<MountHost::ScrollBinding*>(lv_event_get_user_data(event));
+  if (binding == nullptr || !binding->live || binding->callback == nullptr) return;
+  auto* target = static_cast<lv_obj_t*>(lv_event_get_target(event));
+  if (target == nullptr) return;
+  const auto offset = lv_obj_get_scroll_y(target);
+  const auto content = lv_obj_get_height(target) + lv_obj_get_scroll_bottom(target);
+  const auto viewport = lv_obj_get_height(target);
+  binding->callback(binding->context, binding->surface_id, binding->node_id,
+                    type, offset, content, viewport,
+                    static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL);
+  if (code == LV_EVENT_SCROLL && offset <= 0) {
+    binding->callback(binding->context, binding->surface_id, binding->node_id,
+                      core::package::EventType::kScrollTop, offset, content,
+                      viewport, static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL);
+  }
+  if (code == LV_EVENT_SCROLL && lv_obj_get_scroll_bottom(target) <= 0) {
+    binding->callback(binding->context, binding->surface_id, binding->node_id,
+                      core::package::EventType::kScrollBottom, offset, content,
+                      viewport, static_cast<std::uint64_t>(lv_tick_get()) * 1000000ULL);
+  }
+}
+
+void convertRgbaToLvglBgra(std::vector<std::uint8_t>& pixels) noexcept {
+  for (std::size_t index = 0; index + 3 < pixels.size(); index += 4) {
+    std::swap(pixels[index], pixels[index + 2]);
+  }
+}
+
+std::vector<std::uint8_t> resizeBgraNearest(
+    const std::vector<std::uint8_t>& source, unsigned source_width,
+    unsigned source_height, unsigned target_width,
+    unsigned target_height) {
+  std::vector<std::uint8_t> result(
+      static_cast<std::size_t>(target_width) * target_height * 4U);
+  for (unsigned y = 0; y < target_height; ++y) {
+    const unsigned source_y =
+        std::min(source_height - 1U,
+                 static_cast<unsigned>((static_cast<std::uint64_t>(y) *
+                                        source_height) /
+                                       target_height));
+    for (unsigned x = 0; x < target_width; ++x) {
+      const unsigned source_x =
+          std::min(source_width - 1U,
+                   static_cast<unsigned>((static_cast<std::uint64_t>(x) *
+                                          source_width) /
+                                         target_width));
+      const auto source_offset =
+          (static_cast<std::size_t>(source_y) * source_width + source_x) * 4U;
+      const auto target_offset =
+          (static_cast<std::size_t>(y) * target_width + x) * 4U;
+      std::copy_n(source.data() + source_offset, 4U,
+                  result.data() + target_offset);
+    }
+  }
+  return result;
 }
 
 std::string_view propertyName(const BoundedText& property) noexcept {
@@ -72,7 +270,62 @@ bool parseHexColor(std::string_view value, lv_color_t& color) noexcept {
 
 }  // namespace
 
-MountHostLimits simulatorMountHostLimits() noexcept { return {16, 512, 64, 16}; }
+bool MountHost::updateImageDescriptor(HostSlot& slot, void* native_object,
+                                      unsigned width, unsigned height) noexcept {
+  auto* object = static_cast<lv_obj_t*>(native_object);
+  if (slot.image_descriptor != nullptr) {
+    delete static_cast<lv_image_dsc_t*>(slot.image_descriptor);
+    slot.image_descriptor = nullptr;
+  }
+  if (width == 0 || height == 0 || slot.image_pixels.empty()) return false;
+  auto* descriptor = new (std::nothrow) lv_image_dsc_t{};
+  if (descriptor == nullptr) return false;
+  descriptor->header.magic = LV_IMAGE_HEADER_MAGIC;
+  descriptor->header.cf = LV_COLOR_FORMAT_ARGB8888;
+  descriptor->header.w = width;
+  descriptor->header.h = height;
+  descriptor->header.stride = width * 4U;
+  descriptor->data_size = static_cast<std::uint32_t>(slot.image_pixels.size());
+  descriptor->data = slot.image_pixels.data();
+  slot.image_descriptor = descriptor;
+  lv_image_set_src(object, descriptor);
+  lv_image_set_inner_align(object, LV_IMAGE_ALIGN_CENTER);
+  return true;
+}
+
+bool MountHost::resizeImageForLayout(HostSlot& slot, void* native_object) noexcept {
+  auto* object = static_cast<lv_obj_t*>(native_object);
+  if (object == nullptr || slot.image_source_width == 0 ||
+      slot.image_source_height == 0 || slot.image_source_pixels.empty()) {
+    return true;
+  }
+  const auto target_width = static_cast<unsigned>(lv_obj_get_width(object));
+  const auto target_height = static_cast<unsigned>(lv_obj_get_height(object));
+  if (target_width == 0 || target_height == 0) return true;
+
+  const auto width_scale = static_cast<double>(target_width) /
+                           slot.image_source_width;
+  const auto height_scale = static_cast<double>(target_height) /
+                            slot.image_source_height;
+  const auto scale = std::min(1.0, std::min(width_scale, height_scale));
+  const auto width = std::max(
+      1U, static_cast<unsigned>(slot.image_source_width * scale));
+  const auto height = std::max(
+      1U, static_cast<unsigned>(slot.image_source_height * scale));
+  try {
+    slot.image_pixels =
+        (width == slot.image_source_width && height == slot.image_source_height)
+            ? slot.image_source_pixels
+            : resizeBgraNearest(slot.image_source_pixels,
+                                slot.image_source_width,
+                                slot.image_source_height, width, height);
+  } catch (...) {
+    return false;
+  }
+  return updateImageDescriptor(slot, object, width, height);
+}
+
+MountHostLimits simulatorMountHostLimits() noexcept { return {16, 512, 256, 16}; }
 
 MountHostLimits embeddedMountHostLimits() noexcept { return {4, 64, 16, 4}; }
 
@@ -185,6 +438,27 @@ std::optional<core::NodeId> MountHost::nodeAt(
   return result;
 }
 
+void* MountHost::nativeObject(const core::SurfaceId& surface_id,
+                              const core::NodeId& node_id) const noexcept {
+  const auto slot = findSlot(surface_id, node_id);
+  return slot.has_value() ? objects_[*slot].native_object : nullptr;
+}
+
+std::vector<MountHost::ImageSnapshot> MountHost::imageSnapshots(
+    const core::SurfaceId& surface_id) const {
+  std::vector<ImageSnapshot> result;
+  for (const auto& slot : objects_) {
+    if (!slot.live || !slot.surface_id || !slot.node_id ||
+        *slot.surface_id != surface_id || slot.type != HostComponentType::kImage) {
+      continue;
+    }
+    result.push_back(ImageSnapshot{*slot.node_id, slot.native_object,
+                                   slot.image_descriptor != nullptr,
+                                   slot.image_pixels.size()});
+  }
+  return result;
+}
+
 bool MountHost::installClickHandler(const core::SurfaceId& surface_id,
                                     const core::NodeId& node_id,
                                     ClickCallback callback,
@@ -215,6 +489,225 @@ bool MountHost::installClickHandler(const core::SurfaceId& surface_id,
   return false;
 }
 
+bool MountHost::installInputHandler(const core::SurfaceId& surface_id,
+                                    const core::NodeId& node_id,
+                                    InputCallback callback,
+                                    void* context) noexcept {
+  if (callback == nullptr) return false;
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || objects_[*slot].type != HostComponentType::kInput) return false;
+  for (auto& binding : input_bindings_) {
+    if (binding.live && binding.surface_id == surface_id && binding.node_id == node_id) {
+      binding.callback = callback;
+      binding.context = context;
+      return true;
+    }
+  }
+  for (auto& binding : input_bindings_) {
+    if (!binding.live) {
+      binding.live = true;
+      binding.surface_id = surface_id;
+      binding.node_id = node_id;
+      binding.callback = callback;
+      binding.context = context;
+      auto* object = static_cast<lv_obj_t*>(objects_[*slot].native_object);
+      lv_obj_add_event_cb(object, onInput, LV_EVENT_FOCUSED, &binding);
+      lv_obj_add_event_cb(object, onInput, LV_EVENT_VALUE_CHANGED, &binding);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MountHost::installSwitchHandler(const core::SurfaceId& surface_id,
+                                     const core::NodeId& node_id,
+                                     SwitchCallback callback,
+                                     void* context) noexcept {
+  if (callback == nullptr) return false;
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || objects_[*slot].type != HostComponentType::kSwitch) return false;
+  for (auto& binding : switch_bindings_) {
+    if (binding.live && binding.surface_id == surface_id &&
+        binding.node_id == node_id) {
+      binding.callback = callback;
+      binding.context = context;
+      return true;
+    }
+  }
+  for (auto& binding : switch_bindings_) {
+    if (!binding.live) {
+      binding.live = true;
+      binding.surface_id = surface_id;
+      binding.node_id = node_id;
+      binding.callback = callback;
+      binding.context = context;
+      lv_obj_add_event_cb(static_cast<lv_obj_t*>(objects_[*slot].native_object),
+                          onSwitch, LV_EVENT_VALUE_CHANGED, &binding);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MountHost::installSliderHandler(const core::SurfaceId& surface_id,
+                                     const core::NodeId& node_id,
+                                     SliderCallback callback,
+                                     void* context) noexcept {
+  if (callback == nullptr) return false;
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || objects_[*slot].type != HostComponentType::kSlider) return false;
+  for (auto& binding : slider_bindings_) {
+    if (binding.live && binding.surface_id == surface_id &&
+        binding.node_id == node_id) {
+      binding.callback = callback;
+      binding.context = context;
+      binding.minimum = objects_[*slot].slider_minimum;
+      binding.maximum = objects_[*slot].slider_maximum;
+      binding.step = objects_[*slot].slider_step;
+      binding.scale = objects_[*slot].slider_scale;
+      return true;
+    }
+  }
+  for (auto& binding : slider_bindings_) {
+    if (!binding.live) {
+      binding.live = true;
+      binding.surface_id = surface_id;
+      binding.node_id = node_id;
+      binding.callback = callback;
+      binding.context = context;
+      binding.minimum = objects_[*slot].slider_minimum;
+      binding.maximum = objects_[*slot].slider_maximum;
+      binding.step = objects_[*slot].slider_step;
+      binding.scale = objects_[*slot].slider_scale;
+      lv_obj_add_event_cb(static_cast<lv_obj_t*>(objects_[*slot].native_object),
+                          onSlider, LV_EVENT_VALUE_CHANGED, &binding);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MountHost::installPickerHandler(const core::SurfaceId& surface_id,
+                                     const core::NodeId& node_id,
+                                     PickerCallback callback,
+                                     void* context) noexcept {
+  if (callback == nullptr) return false;
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || objects_[*slot].type != HostComponentType::kPicker) return false;
+  for (auto& binding : picker_bindings_) {
+    if (binding.live && binding.surface_id == surface_id &&
+        binding.node_id == node_id) {
+      binding.callback = callback;
+      binding.context = context;
+      return true;
+    }
+  }
+  for (auto& binding : picker_bindings_) {
+    if (!binding.live) {
+      binding.live = true;
+      binding.surface_id = surface_id;
+      binding.node_id = node_id;
+      binding.callback = callback;
+      binding.context = context;
+      lv_obj_add_event_cb(static_cast<lv_obj_t*>(objects_[*slot].native_object),
+                          onPicker, LV_EVENT_VALUE_CHANGED, &binding);
+      lv_obj_add_event_cb(static_cast<lv_obj_t*>(objects_[*slot].native_object),
+                          onPicker, LV_EVENT_CANCEL, &binding);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MountHost::confirmPicker(const core::SurfaceId& surface_id,
+                              const core::NodeId& node_id) noexcept {
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || objects_[*slot].type != HostComponentType::kPicker) return false;
+  lv_obj_send_event(static_cast<lv_obj_t*>(objects_[*slot].native_object),
+                    LV_EVENT_VALUE_CHANGED, nullptr);
+  return true;
+}
+
+bool MountHost::cancelPicker(const core::SurfaceId& surface_id,
+                             const core::NodeId& node_id) noexcept {
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || objects_[*slot].type != HostComponentType::kPicker) return false;
+  lv_obj_send_event(static_cast<lv_obj_t*>(objects_[*slot].native_object),
+                    LV_EVENT_CANCEL, nullptr);
+  return true;
+}
+
+bool MountHost::installTabsHandler(const core::SurfaceId& surface_id,
+                                   const core::NodeId& node_id,
+                                   TabsCallback callback,
+                                   void* context) noexcept {
+  if (callback == nullptr) return false;
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || objects_[*slot].type != HostComponentType::kTabs) return false;
+  for (auto& binding : tabs_bindings_) {
+    if (binding.live && binding.surface_id == surface_id &&
+        binding.node_id == node_id) {
+      binding.callback = callback;
+      binding.context = context;
+      return true;
+    }
+  }
+  for (auto& binding : tabs_bindings_) {
+    if (!binding.live) {
+      binding.live = true;
+      binding.surface_id = surface_id;
+      binding.node_id = node_id;
+      binding.callback = callback;
+      binding.context = context;
+      lv_obj_add_event_cb(static_cast<lv_obj_t*>(objects_[*slot].native_object),
+                          onTabs, LV_EVENT_VALUE_CHANGED, &binding);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MountHost::installScrollHandler(const core::SurfaceId& surface_id,
+                                     const core::NodeId& node_id,
+                                     ScrollCallback callback,
+                                     void* context) noexcept {
+  if (callback == nullptr) return false;
+  const auto slot = findSlot(surface_id, node_id);
+  if (!slot || (objects_[*slot].type != HostComponentType::kScroll &&
+                objects_[*slot].type != HostComponentType::kList)) {
+    return false;
+  }
+  for (auto& binding : scroll_bindings_) {
+    if (binding.live && binding.surface_id == surface_id &&
+        binding.node_id == node_id) {
+      binding.callback = callback;
+      binding.context = context;
+      return true;
+    }
+  }
+  for (auto& binding : scroll_bindings_) {
+    if (!binding.live) {
+      binding.live = true;
+      binding.surface_id = surface_id;
+      binding.node_id = node_id;
+      binding.callback = callback;
+      binding.context = context;
+      auto* object = static_cast<lv_obj_t*>(objects_[*slot].native_object);
+      lv_obj_add_event_cb(object, onScroll, LV_EVENT_SCROLL, &binding);
+      lv_obj_add_event_cb(object, onScroll, LV_EVENT_SCROLL_END, &binding);
+      return true;
+    }
+  }
+  return false;
+}
+
+void MountHost::setResource(
+    std::string path,
+    std::shared_ptr<const std::vector<std::uint8_t>> bytes) noexcept {
+  if (path.empty() || bytes == nullptr) return;
+  resources_[std::move(path)] = std::move(bytes);
+}
+
 foundation::LocalResult MountHost::resolveRoot(const core::SurfaceId& surface_id,
                                                void*& root) noexcept {
   RootLookupContext context{&roots_, nullptr};
@@ -235,14 +728,15 @@ std::optional<std::size_t> MountHost::acquireFont(
     return std::nullopt;
   }
   for (std::size_t index = 0; index < limits_.max_font_instances; ++index) {
-    if (fonts_[index].live && fonts_[index].size == size) {
+    if (fonts_[index].native_font != nullptr && fonts_[index].size == size) {
+      fonts_[index].live = true;
       ++fonts_[index].references;
       return index;
     }
   }
   std::size_t free = limits_.max_font_instances;
   for (std::size_t index = 0; index < limits_.max_font_instances; ++index) {
-    if (!fonts_[index].live) {
+    if (fonts_[index].native_font == nullptr) {
       free = index;
       break;
     }
@@ -250,7 +744,8 @@ std::optional<std::size_t> MountHost::acquireFont(
   if (free == limits_.max_font_instances) return std::nullopt;
   const auto bytes = font::systemDefaultFontBytes();
   lv_font_t* native = lv_tiny_ttf_create_data_ex(
-      bytes.data(), bytes.size(), size, LV_FONT_KERNING_NONE, 8);
+      bytes.data(), bytes.size(), size, LV_FONT_KERNING_NONE,
+      kTinyTtfCacheGlyphCount);
   if (native == nullptr) return std::nullopt;
   fonts_[free] = FontSlot{true, size, 1, native};
   return free;
@@ -262,10 +757,76 @@ void MountHost::releaseFont(std::size_t index) noexcept {
     return;
   }
   --fonts_[index].references;
-  if (fonts_[index].references != 0) return;
-  auto* native = static_cast<lv_font_t*>(fonts_[index].native_font);
-  if (native != nullptr) lv_tiny_ttf_destroy(native);
-  fonts_[index] = FontSlot{};
+  if (fonts_[index].references == 0) fonts_[index].live = false;
+}
+
+void MountHost::destroyFonts() noexcept {
+  for (std::size_t index = 0; index < limits_.max_font_instances; ++index) {
+    if (fonts_[index].native_font != nullptr) {
+      lv_tiny_ttf_destroy(static_cast<lv_font_t*>(fonts_[index].native_font));
+    }
+    fonts_[index] = FontSlot{};
+  }
+}
+
+bool MountHost::applySliderConfiguration(HostSlot& slot,
+                                         void* native_object) noexcept {
+  if (native_object == nullptr || slot.slider_maximum <= slot.slider_minimum ||
+      slot.slider_step <= 0 || !std::isfinite(slot.slider_minimum) ||
+      !std::isfinite(slot.slider_maximum) || !std::isfinite(slot.slider_step)) {
+    return false;
+  }
+  const auto native_min = static_cast<std::int64_t>(std::llround(
+      slot.slider_minimum * slot.slider_scale));
+  const auto native_max = static_cast<std::int64_t>(std::llround(
+      slot.slider_maximum * slot.slider_scale));
+  if (native_min < std::numeric_limits<std::int32_t>::min() ||
+      native_max > std::numeric_limits<std::int32_t>::max() ||
+      native_min >= native_max) {
+    return false;
+  }
+  auto* object = static_cast<lv_obj_t*>(native_object);
+  lv_slider_set_range(object, static_cast<std::int32_t>(native_min),
+                      static_cast<std::int32_t>(native_max));
+  const double current = static_cast<double>(lv_slider_get_value(object)) /
+                         slot.slider_scale;
+  const double quantized = std::clamp(
+      slot.slider_minimum +
+          std::round((current - slot.slider_minimum) / slot.slider_step) *
+              slot.slider_step,
+      slot.slider_minimum, slot.slider_maximum);
+  const auto native_value = static_cast<std::int64_t>(std::llround(
+      quantized * slot.slider_scale));
+  if (native_value < native_min || native_value > native_max) return false;
+  lv_slider_set_value(object, static_cast<std::int32_t>(native_value),
+                      LV_ANIM_OFF);
+  return true;
+}
+
+bool MountHost::applyPickerSelection(HostSlot& slot,
+                                     void* native_object) noexcept {
+  if (native_object == nullptr || slot.picker_selected < 0) return false;
+  auto* object = static_cast<lv_obj_t*>(native_object);
+  const auto count = lv_dropdown_get_option_count(object);
+  if (count == 0 || static_cast<std::uint32_t>(slot.picker_selected) >= count) {
+    return false;
+  }
+  lv_dropdown_set_selected(object,
+                           static_cast<std::uint32_t>(slot.picker_selected));
+  return true;
+}
+
+bool MountHost::applyTabsSelection(HostSlot& slot,
+                                   void* native_object) noexcept {
+  if (native_object == nullptr || slot.type != HostComponentType::kTabs ||
+      slot.tabs_selected < 0 ||
+      static_cast<std::size_t>(slot.tabs_selected) >= slot.tabs_items.size()) {
+    return false;
+  }
+  lv_tabview_set_active(static_cast<lv_obj_t*>(native_object),
+                        static_cast<std::uint32_t>(slot.tabs_selected),
+                        LV_ANIM_OFF);
+  return true;
 }
 
 bool MountHost::preflight(const MountTransaction& transaction,
@@ -331,6 +892,11 @@ bool MountHost::preflight(const MountTransaction& transaction,
             const auto name = propertyName(value.property);
             valid = valid && !value.property.truncated &&
                     (name == "text" || name == "enabled" ||
+                              name == "value" || name == "checked" ||
+                              name == "min" || name == "max" || name == "step" ||
+                              name == "mode" || name == "range" || name == "selected" ||
+                              name == "items" ||
+                              name == "src" ||
                               name == "backgroundColor" || name == "color" ||
                               name == "borderRadius" || name == "textAlign" ||
                               name == "fontSize");
@@ -386,6 +952,7 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
                      MountResultStatus::kFailed, std::nullopt,
                      liveObjectCountForSurface(transaction.surface_id)};
   void* root = nullptr;
+  const char* failure_reason = "mount commit failed";
   if (!resolveRoot(transaction.surface_id, root).ok() ||
       !preflight(transaction, nullptr)) {
     result.error = error(RuntimeErrorCode::kPlatformRejected,
@@ -405,6 +972,7 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
           if constexpr (std::is_same_v<Value, CreateHost>) {
             const auto free = freeSlot();
             if (!free.has_value()) {
+              failure_reason = "host object capacity exhausted";
               succeeded = false;
               return;
             }
@@ -414,10 +982,37 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
               object = lv_label_create(parent);
             } else if (value.type == HostComponentType::kButton) {
               object = lv_button_create(parent);
+            } else if (value.type == HostComponentType::kInput) {
+              object = lv_textarea_create(parent);
+              if (object != nullptr) lv_textarea_set_one_line(object, true);
+            } else if (value.type == HostComponentType::kSwitch) {
+              object = lv_switch_create(parent);
+            } else if (value.type == HostComponentType::kSlider) {
+              object = lv_slider_create(parent);
+            } else if (value.type == HostComponentType::kPicker) {
+              object = lv_dropdown_create(parent);
+            } else if (value.type == HostComponentType::kTabs) {
+              object = lv_tabview_create(parent);
+            } else if (value.type == HostComponentType::kScroll) {
+              object = lv_obj_create(parent);
+              if (object != nullptr) {
+                lv_obj_set_scrollable(object, true);
+                lv_obj_set_scroll_dir(object, LV_DIR_VER);
+                lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_AUTO);
+              }
+            } else if (value.type == HostComponentType::kList) {
+              object = lv_obj_create(parent);
+              if (object != nullptr) {
+                lv_obj_set_scrollable(object, false);
+                lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_OFF);
+              }
+            } else if (value.type == HostComponentType::kImage) {
+              object = lv_image_create(parent);
             } else {
               object = lv_obj_create(parent);
             }
             if (object == nullptr) {
+              failure_reason = "host object creation failed";
               succeeded = false;
               return;
             }
@@ -428,15 +1023,33 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
             slot.node_id = value.node_id;
             slot.type = value.type;
             slot.native_object = object;
+            if (value.type == HostComponentType::kView ||
+                value.type == HostComponentType::kList ||
+                value.type == HostComponentType::kScroll) {
+              resetViewChrome(object);
+              if (value.type == HostComponentType::kScroll) {
+                lv_obj_set_scrollable(object, true);
+                lv_obj_set_scroll_dir(object, LV_DIR_VER);
+                lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_AUTO);
+              }
+            }
             if (value.type == HostComponentType::kText) {
               lv_label_set_text(object, "");
             } else if (value.type == HostComponentType::kButton) {
               slot.private_label = lv_label_create(object);
-              if (slot.private_label == nullptr) succeeded = false;
+              if (slot.private_label == nullptr) {
+                failure_reason = "button label creation failed";
+                succeeded = false;
+              }
+            } else if (value.type == HostComponentType::kInput) {
+              lv_textarea_set_text(object, "");
+            } else if (value.type == HostComponentType::kTabs) {
+              resetViewChrome(object);
             }
             if (succeeded && value.type != HostComponentType::kView) {
               const auto default_font = acquireFont(kDefaultFontSize);
               succeeded = default_font.has_value();
+              if (!succeeded) failure_reason = "default font allocation failed";
               if (succeeded) {
                 auto* target = static_cast<lv_obj_t*>(
                     slot.private_label != nullptr ? slot.private_label : object);
@@ -450,6 +1063,7 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
             const auto slot_index =
                 findSlot(transaction.surface_id, value.node_id);
             if (!slot_index.has_value()) {
+              failure_reason = "host property target not found";
               succeeded = false;
               return;
             }
@@ -462,17 +1076,217 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
                                                          ? slot.private_label
                                                          : object);
               succeeded = text != nullptr;
-              if (succeeded) lv_label_set_text(target, text->view().data());
+              if (succeeded) {
+                std::string value(text->view());
+                lv_label_set_text(target, value.c_str());
+              }
             } else if (name == "enabled") {
               const auto* enabled = std::get_if<bool>(&value.value);
-              succeeded = enabled != nullptr && slot.type == HostComponentType::kButton;
+              succeeded = enabled != nullptr &&
+                          (slot.type == HostComponentType::kButton ||
+                           slot.type == HostComponentType::kInput ||
+                           slot.type == HostComponentType::kSwitch);
               if (succeeded) lv_obj_set_state(object, LV_STATE_DISABLED, !*enabled);
+            } else if (name == "checked") {
+              const auto* checked = std::get_if<bool>(&value.value);
+              succeeded = checked != nullptr && slot.type == HostComponentType::kSwitch;
+              if (succeeded) {
+                lv_obj_set_state(object, LV_STATE_CHECKED, *checked);
+              }
+            } else if (name == "min" || name == "max" || name == "step") {
+              const auto* number = std::get_if<double>(&value.value);
+              succeeded = number != nullptr && slot.type == HostComponentType::kSlider &&
+                          std::isfinite(*number);
+              if (succeeded) {
+                if (name == "min") slot.slider_minimum = *number;
+                else if (name == "max") slot.slider_maximum = *number;
+                else slot.slider_step = *number;
+                succeeded = applySliderConfiguration(slot, object);
+                if (!succeeded) failure_reason = "slider configuration invalid";
+              }
+            } else if (name == "value") {
+              if (slot.type == HostComponentType::kInput) {
+                const auto* text = std::get_if<BoundedText>(&value.value);
+                succeeded = text != nullptr;
+                if (succeeded) {
+                  std::string value(text->view());
+                  lv_textarea_set_text(object, value.c_str());
+                }
+              } else if (slot.type == HostComponentType::kSlider) {
+                const auto* number = std::get_if<double>(&value.value);
+                succeeded = number != nullptr && std::isfinite(*number);
+                if (succeeded) {
+                  const double clamped = std::clamp(*number, slot.slider_minimum,
+                                                    slot.slider_maximum);
+                  const double steps = std::round(
+                      (clamped - slot.slider_minimum) / slot.slider_step);
+                  const double quantized = slot.slider_minimum +
+                                            steps * slot.slider_step;
+                  const auto native = static_cast<std::int64_t>(std::llround(
+                      quantized * slot.slider_scale));
+                  succeeded = native >= std::numeric_limits<std::int32_t>::min() &&
+                              native <= std::numeric_limits<std::int32_t>::max();
+                  if (succeeded) {
+                    lv_slider_set_value(object, static_cast<std::int32_t>(native),
+                                        LV_ANIM_OFF);
+                  }
+                }
+              } else {
+                succeeded = false;
+              }
+            } else if (name == "mode") {
+              const auto* mode = std::get_if<BoundedText>(&value.value);
+              succeeded = mode != nullptr && slot.type == HostComponentType::kPicker &&
+                          mode->view() == "text";
+            } else if (name == "range") {
+              const auto* range = std::get_if<BoundedText>(&value.value);
+              succeeded = range != nullptr && slot.type == HostComponentType::kPicker;
+              if (succeeded) {
+                std::string options(range->view());
+                std::replace(options.begin(), options.end(), '|', '\n');
+                lv_dropdown_set_options(object, options.c_str());
+              }
+            } else if (name == "selected") {
+              const auto* selected = std::get_if<double>(&value.value);
+              succeeded = selected != nullptr &&
+                          (slot.type == HostComponentType::kPicker ||
+                           slot.type == HostComponentType::kTabs) &&
+                          std::isfinite(*selected) && *selected >= 0 &&
+                          std::floor(*selected) == *selected &&
+                          *selected <= static_cast<double>(std::numeric_limits<std::uint32_t>::max());
+              if (succeeded) {
+                if (slot.type == HostComponentType::kPicker) {
+                  slot.picker_selected = static_cast<std::int32_t>(*selected);
+                  succeeded = applyPickerSelection(slot, object);
+                } else {
+                  slot.tabs_selected = static_cast<std::int32_t>(*selected);
+                  // Properties are decoded from an object map. Keep the
+                  // controlled value if items has not been applied yet; the
+                  // items operation applies it once native tabs exist.
+                  succeeded = slot.tabs_items.empty() ||
+                              applyTabsSelection(slot, object);
+                }
+              }
+            } else if (name == "items") {
+              const auto* items = std::get_if<BoundedText>(&value.value);
+              succeeded = items != nullptr && slot.type == HostComponentType::kTabs &&
+                          !items->truncated && !items->view().empty();
+              if (succeeded) {
+                slot.tabs_items.clear();
+                std::string item_text(items->view());
+                std::size_t start = 0;
+                while (start <= item_text.size()) {
+                  const auto end = item_text.find('|', start);
+                  const auto token = item_text.substr(
+                      start, end == std::string::npos ? std::string::npos : end - start);
+                  if (token.empty()) {
+                    succeeded = false;
+                    break;
+                  }
+                  slot.tabs_items.push_back(token);
+                  if (end == std::string::npos) break;
+                  start = end + 1;
+                }
+                succeeded = succeeded && !slot.tabs_items.empty() &&
+                            slot.tabs_items.size() <= 32;
+                if (succeeded) {
+                  for (const auto& item : slot.tabs_items) {
+                    if (lv_tabview_add_tab(object, item.c_str()) == nullptr) {
+                      succeeded = false;
+                      break;
+                    }
+                  }
+                  if (succeeded) succeeded = applyTabsSelection(slot, object);
+                }
+              }
+            } else if (name == "src") {
+              const auto* text = std::get_if<BoundedText>(&value.value);
+              const auto resource = text == nullptr
+                                        ? resources_.end()
+                                        : resources_.find(std::string(text->view()));
+              succeeded = text != nullptr && slot.type == HostComponentType::kImage &&
+                          resource != resources_.end();
+              if (!succeeded) failure_reason = "image resource is unavailable";
+              if (succeeded) {
+                if (slot.image_descriptor != nullptr) {
+                  delete static_cast<lv_image_dsc_t*>(slot.image_descriptor);
+                  slot.image_descriptor = nullptr;
+                }
+                unsigned char* decoded = nullptr;
+                unsigned width = 0;
+                unsigned height = 0;
+                const auto& bytes = *resource->second;
+                auto decoded_resource = decoded_resources_.find(std::string(text->view()));
+                if (decoded_resource == decoded_resources_.end()) {
+                  const unsigned code = lodepng_decode32(
+                      &decoded, &width, &height, bytes.data(), bytes.size());
+                  auto* decoded_buffer =
+                      reinterpret_cast<lv_draw_buf_t*>(decoded);
+                  if (code != 0 || decoded_buffer == nullptr || width == 0 ||
+                      height == 0 || decoded_buffer->data == nullptr ||
+                      decoded_buffer->data_size <
+                          static_cast<std::size_t>(width) * height * 4U) {
+                    if (decoded_buffer != nullptr) {
+                      lv_draw_buf_destroy(decoded_buffer);
+                    }
+                    failure_reason = "image resource decode failed";
+                    succeeded = false;
+                  } else {
+                    auto pixels = std::make_shared<std::vector<std::uint8_t>>(
+                        decoded_buffer->data,
+                        decoded_buffer->data +
+                            static_cast<std::size_t>(width) * height * 4U);
+                    lv_draw_buf_destroy(decoded_buffer);
+                    // lodepng_decode32 exposes RGBA bytes through the draw
+                    // buffer; LVGL ARGB8888 uses BGRA memory order here.
+                    convertRgbaToLvglBgra(*pixels);
+                    decoded_resource = decoded_resources_
+                        .emplace(std::string(text->view()),
+                                 DecodedImageResource{width, height, std::move(pixels)})
+                        .first;
+                  }
+                }
+                if (succeeded) {
+                  const auto& cached = decoded_resource->second;
+                  width = cached.width;
+                  height = cached.height;
+                  slot.image_source_width = width;
+                  slot.image_source_height = height;
+                  slot.image_source_pixels = *cached.pixels;
+                  slot.image_pixels = slot.image_source_pixels;
+                  auto* descriptor = new (std::nothrow) lv_image_dsc_t{};
+                  if (descriptor == nullptr) {
+                    failure_reason = "image descriptor allocation failed";
+                    succeeded = false;
+                  } else {
+                    descriptor->header.magic = LV_IMAGE_HEADER_MAGIC;
+                    descriptor->header.cf = LV_COLOR_FORMAT_ARGB8888;
+                    descriptor->header.w = width;
+                    descriptor->header.h = height;
+                    descriptor->header.stride = width * 4U;
+                    descriptor->data_size = static_cast<std::uint32_t>(slot.image_pixels.size());
+                    descriptor->data = slot.image_pixels.data();
+                    slot.image_descriptor = descriptor;
+                    lv_image_set_src(object, descriptor);
+                    lv_image_set_inner_align(object, LV_IMAGE_ALIGN_CENTER);
+                    if (lv_obj_get_width(object) > 0 &&
+                        lv_obj_get_height(object) > 0) {
+                      succeeded = resizeImageForLayout(slot, object);
+                      if (!succeeded) failure_reason = "image resize failed";
+                    }
+                  }
+                }
+              }
             } else if (name == "backgroundColor" || name == "color") {
               const auto* text = std::get_if<BoundedText>(&value.value);
               lv_color_t color{};
               succeeded = text != nullptr && parseHexColor(text->view(), color);
               if (succeeded && name == "backgroundColor") {
                 lv_obj_set_style_bg_color(object, color, 0);
+                // View objects start transparent so their default chrome does
+                // not cover the parent. A declared backgroundColor is an
+                // explicit opaque surface style.
+                lv_obj_set_style_bg_opa(object, LV_OPA_COVER, 0);
               } else if (succeeded) {
                 lv_obj_set_style_text_color(object, color, 0);
               }
@@ -511,6 +1325,7 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
                 lv_obj_set_style_text_align(object, align, 0);
               }
             } else {
+              failure_reason = "unsupported host property";
               succeeded = false;
             }
           } else if constexpr (std::is_same_v<Value, SetHostLayout>) {
@@ -521,6 +1336,16 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
               auto* object = static_cast<lv_obj_t*>(objects_[*slot_index].native_object);
               lv_obj_set_pos(object, value.rect.x, value.rect.y);
               lv_obj_set_size(object, value.rect.width, value.rect.height);
+              if (objects_[*slot_index].type == HostComponentType::kImage) {
+                // Resize the decoded pixels to the final host rectangle so
+                // small images do not enter LVGL's transform path.
+                auto& image_slot = objects_[*slot_index];
+                if (image_slot.image_source_width != 0 &&
+                    !resizeImageForLayout(image_slot, object)) {
+                  succeeded = false;
+                  failure_reason = "image resize failed";
+                }
+              }
             }
           } else if constexpr (std::is_same_v<Value, InsertHostChild>) {
             const auto child =
@@ -562,7 +1387,7 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
     if (!succeeded) {
       destroySurfaceObjects(transaction.surface_id);
       result.error = error(RuntimeErrorCode::kPlatformRejected,
-                           "mount commit failed");
+                           failure_reason);
       result.live_objects = 0;
       return result;
     }
@@ -635,6 +1460,9 @@ foundation::LocalResult MountHost::finishClose(
     return foundation::LocalResult::failure(foundation::LocalError::kBusy);
   }
   destroyAllObjects();
+  destroyFonts();
+  decoded_resources_.clear();
+  resources_.clear();
   closed_.store(true, std::memory_order_release);
   return foundation::LocalResult::success();
 }
@@ -676,9 +1504,77 @@ void MountHost::destroySlot(std::size_t index) noexcept {
       }
     }
   }
+  for (std::size_t cursor = 0; cursor < limits_.max_host_objects; ++cursor) {
+    if (removed[cursor]) {
+      // Invalidate callbacks before LVGL begins deleting the object tree. LVGL
+      // may synchronously dispatch lifecycle callbacks during deletion; those
+      // callbacks must observe an inert binding rather than a retired node.
+      if (objects_[cursor].surface_id && objects_[cursor].node_id) {
+        for (auto& binding : click_bindings_) {
+          if (binding.live && binding.surface_id == *objects_[cursor].surface_id &&
+              binding.node_id == *objects_[cursor].node_id) {
+            binding.live = false;
+            binding.callback = nullptr;
+            binding.context = nullptr;
+          }
+        }
+        for (auto& binding : input_bindings_) {
+          if (binding.live && binding.surface_id == *objects_[cursor].surface_id &&
+              binding.node_id == *objects_[cursor].node_id) {
+            binding.live = false;
+            binding.callback = nullptr;
+            binding.context = nullptr;
+          }
+        }
+        for (auto& binding : switch_bindings_) {
+          if (binding.live && binding.surface_id == *objects_[cursor].surface_id &&
+              binding.node_id == *objects_[cursor].node_id) {
+            binding.live = false;
+            binding.callback = nullptr;
+            binding.context = nullptr;
+          }
+        }
+        for (auto& binding : slider_bindings_) {
+          if (binding.live && binding.surface_id == *objects_[cursor].surface_id &&
+              binding.node_id == *objects_[cursor].node_id) {
+            binding.live = false;
+            binding.callback = nullptr;
+            binding.context = nullptr;
+          }
+        }
+        for (auto& binding : picker_bindings_) {
+          if (binding.live && binding.surface_id == *objects_[cursor].surface_id &&
+              binding.node_id == *objects_[cursor].node_id) {
+            binding.live = false;
+            binding.callback = nullptr;
+            binding.context = nullptr;
+          }
+        }
+        for (auto& binding : tabs_bindings_) {
+          if (binding.live && binding.surface_id == *objects_[cursor].surface_id &&
+              binding.node_id == *objects_[cursor].node_id) {
+            binding.live = false;
+            binding.callback = nullptr;
+            binding.context = nullptr;
+          }
+        }
+        for (auto& binding : scroll_bindings_) {
+          if (binding.live && binding.surface_id == *objects_[cursor].surface_id &&
+              binding.node_id == *objects_[cursor].node_id) {
+            binding.live = false;
+            binding.callback = nullptr;
+            binding.context = nullptr;
+          }
+        }
+      }
+    }
+  }
   if (object != nullptr && lv_obj_is_valid(object)) lv_obj_delete(object);
   for (std::size_t cursor = 0; cursor < limits_.max_host_objects; ++cursor) {
     if (removed[cursor]) {
+      if (objects_[cursor].image_descriptor != nullptr) {
+        delete static_cast<lv_image_dsc_t*>(objects_[cursor].image_descriptor);
+      }
       if (objects_[cursor].font_slot.has_value()) {
         releaseFont(*objects_[cursor].font_slot);
       }

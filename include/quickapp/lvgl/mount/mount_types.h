@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "quickapp/core/foundation/error.h"
 #include "quickapp/core/foundation/id.h"
@@ -14,7 +15,7 @@
 
 namespace quickapp::lvgl::mount {
 
-inline constexpr std::size_t kMaxMountOperations = 64;
+inline constexpr std::size_t kMaxMountOperations = 256;
 inline constexpr std::size_t kMaxPropertyText = 512;
 
 struct BoundedText final {
@@ -28,7 +29,7 @@ struct BoundedText final {
   }
 };
 
-using HostProperty = std::variant<bool, std::int32_t, BoundedText>;
+using HostProperty = std::variant<bool, double, std::int32_t, BoundedText>;
 
 struct HostRect final {
   std::int32_t x{0};
@@ -82,13 +83,14 @@ struct MountTransaction final {
         revision(rev),
         mount_attempt_id(std::move(attempt)),
         source_id(source),
-        mode(mount_mode) {}
+        mode(mount_mode),
+        operations(kMaxMountOperations) {}
   core::SurfaceId surface_id;
   std::uint64_t revision{0};
   core::MountAttemptId mount_attempt_id;
   BoundedText source_id;
   MountMode mode{MountMode::kIncremental};
-  std::array<MountOperation, kMaxMountOperations> operations;
+  std::vector<MountOperation> operations;
   std::size_t operation_count{0};
 };
 

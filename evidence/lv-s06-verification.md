@@ -22,10 +22,10 @@ behavior.
 
 The mandatory V1 identity is the fixed `system-default/400` catalog entry
 backed by the repository-declared `NotoSansSC-Alpha.ttf` asset, with
-digest `5d99238d1f9493227eeaf535e5f9d93634bd177c7b032fb171d69e96a9969f71`.
+digest `8d29e294f21b8cf18760e8b0abeda5bc4e88acda8a8d899034d5bd298523434f`.
 Both profiles use the same asset identity and algorithm; only fixed capacity
 limits differ. The Alpha asset covers ASCII and the declared Case 001 CJK
-corpus, not arbitrary Unicode CJK.
+P0 corpus, not arbitrary Unicode CJK.
 
 ## Matrix
 

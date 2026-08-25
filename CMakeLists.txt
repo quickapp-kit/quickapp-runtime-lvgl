@@ -7,11 +7,17 @@ option(QUICKAPP_LVGL_BUILD_S03 "Build LV-S03 Surface Host" ON)
 option(QUICKAPP_LVGL_BUILD_S04 "Build LV-S04 Mount Host Components" ON)
 option(QUICKAPP_LVGL_BUILD_S06 "Build LV-S06 Font Measure" ON)
 option(QUICKAPP_LVGL_BUILD_SIMULATOR "Build SDL/libuv simulator backends" ON)
+option(QUICKAPP_LVGL_EMBEDDED_MIN "Build the LVGL runtime without SDL, filesystem, or diagnostics" OFF)
 option(QUICKAPP_LVGL_ENABLE_ASAN "Enable AddressSanitizer and UBSan" OFF)
 option(QUICKAPP_LVGL_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
 if(QUICKAPP_LVGL_ENABLE_ASAN AND QUICKAPP_LVGL_ENABLE_TSAN)
   message(FATAL_ERROR "ASan/UBSan and TSan must use separate builds")
+endif()
+
+if(QUICKAPP_LVGL_EMBEDDED_MIN)
+  set(QUICKAPP_LVGL_BUILD_SIMULATOR OFF CACHE BOOL
+      "Build SDL/libuv simulator backends" FORCE)
 endif()
 
 set(QUICKAPP_LVGL_WARNINGS -Wall -Wextra -Wpedantic -Werror)
@@ -117,6 +123,36 @@ if(QUICKAPP_LVGL_BUILD_S02)
       quickapp_lvgl_foundation quickapp_core_foundation lvgl::lvgl)
     quickapp_lvgl_configure(quickapp_lvgl_surface_host)
 
+    add_library(quickapp_lvgl_feature_provider STATIC
+      src/feature/lvgl_feature_provider.cpp)
+    target_include_directories(quickapp_lvgl_feature_provider PUBLIC include)
+    target_link_libraries(quickapp_lvgl_feature_provider PUBLIC
+      quickapp_core_features quickapp_lvgl_surface_host lvgl::lvgl)
+    quickapp_lvgl_configure(quickapp_lvgl_feature_provider)
+
+    if(QUICKAPP_LVGL_BUILD_TESTS)
+      add_executable(lv_b4_feature_provider_tests
+        tests/lv_b4_feature_provider_tests.cpp)
+      target_link_libraries(lv_b4_feature_provider_tests PRIVATE
+        quickapp_lvgl_feature_provider lvgl)
+      quickapp_lvgl_configure(lv_b4_feature_provider_tests)
+      add_test(NAME lv_b4_feature_provider_tests
+               COMMAND lv_b4_feature_provider_tests)
+      set_tests_properties(lv_b4_feature_provider_tests PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+
+      add_executable(lv_b6_url_provider_tests
+        tests/lv_b6_url_provider_tests.cpp)
+      target_link_libraries(lv_b6_url_provider_tests PRIVATE
+        quickapp_lvgl_feature_provider lvgl)
+      quickapp_lvgl_configure(lv_b6_url_provider_tests)
+      add_test(NAME lv_b6_url_provider_tests
+               COMMAND lv_b6_url_provider_tests)
+      set_tests_properties(lv_b6_url_provider_tests PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+
+    endif()
+
     if(QUICKAPP_LVGL_BUILD_S04)
       add_library(quickapp_lvgl_mount_host STATIC
         src/integration/core_mount_bridge.cpp
@@ -129,6 +165,18 @@ if(QUICKAPP_LVGL_BUILD_S02)
         quickapp_core_foundation quickapp_core_render
         quickapp_lvgl_font_asset lvgl::lvgl)
       quickapp_lvgl_configure(quickapp_lvgl_mount_host)
+
+      if(QUICKAPP_LVGL_BUILD_TESTS)
+        add_executable(lv_b35_tabs_mount_tests
+          tests/lv_b35_tabs_mount_tests.cpp)
+        target_link_libraries(lv_b35_tabs_mount_tests PRIVATE
+          quickapp_lvgl_mount_host quickapp_lvgl_foundation_fakes lvgl)
+        quickapp_lvgl_configure(lv_b35_tabs_mount_tests)
+        add_test(NAME lv_b35_tabs_mount_tests
+                 COMMAND lv_b35_tabs_mount_tests)
+        set_tests_properties(lv_b35_tabs_mount_tests PROPERTIES
+          ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+      endif()
     endif()
   endif()
 

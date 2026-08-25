@@ -33,9 +33,23 @@ PageRootCreateResult LvglPageRootBackend::createHidden(
   if (root == nullptr) {
     return {foundation::LocalError::kBackendFailed, {}};
   }
+  // The page root is a viewport container, not a visible DSL View. Remove
+  // LVGL theme chrome so the runtime tree owns the visual result.
+  lv_obj_set_style_bg_color(root, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(root, 0, 0);
+  lv_obj_set_style_outline_width(root, 0, 0);
+  lv_obj_set_style_shadow_width(root, 0, 0);
+  lv_obj_set_style_radius(root, 0, 0);
+  lv_obj_set_style_pad_all(root, 0, 0);
   lv_obj_set_layout(root, LV_LAYOUT_NONE);
   lv_obj_set_size(root, static_cast<std::int32_t>(std::lround(viewport.width)),
                   static_cast<std::int32_t>(std::lround(viewport.height)));
+  // The page root is the platform viewport. Keep scrolling in the existing
+  // host tree so long content never requires a second runtime container.
+  lv_obj_set_scrollable(root, true);
+  lv_obj_set_scroll_dir(root, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(root, LV_SCROLLBAR_MODE_AUTO);
   lv_obj_set_hidden(root, true);
   roots_[slot] = root;
   return {foundation::LocalError::kNone,

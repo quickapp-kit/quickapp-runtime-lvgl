@@ -42,7 +42,9 @@ core::RuntimeResult<mount::HostProperty> property(
   }
   const auto* number = std::get_if<double>(&value);
   if (number == nullptr ||
-      (name != "borderRadius" && name != "fontSize") ||
+      (name != "borderRadius" && name != "fontSize" && name != "min" &&
+       name != "max" && name != "step" && name != "value" &&
+       name != "selected") ||
       !std::isfinite(*number) ||
       *number < 0 || *number > static_cast<double>(std::numeric_limits<std::int32_t>::max()) ||
       std::floor(*number) != *number ||
@@ -50,7 +52,11 @@ core::RuntimeResult<mount::HostProperty> property(
        (*number < 1 || *number > 256))) {
     return core::RuntimeResult<mount::HostProperty>::failure(error(
         RuntimeErrorCode::kHostFeatureUnsupported,
-        "Core mount property is outside the LVGL Alpha host contract"));
+        "Core mount property is outside the LVGL host contract"));
+  }
+  if (name == "min" || name == "max" || name == "step" ||
+      name == "value" || name == "selected") {
+    return core::RuntimeResult<mount::HostProperty>::success(*number);
   }
   return core::RuntimeResult<mount::HostProperty>::success(
       static_cast<std::int32_t>(*number));
@@ -159,6 +165,11 @@ core::RuntimeResult<mount::MountTransaction> CoreMountBridge::convert(
       } else if (const auto* insert = std::get_if<core::render::InsertHostChild>(&operation)) {
         result.operations[result.operation_count++] = mount::InsertHostChild{
             insert->node_id, insert->parent_node_id, insert->index};
+      } else if (const auto* move = std::get_if<core::render::MoveHost>(&operation)) {
+        result.operations[result.operation_count++] = mount::MoveHost{
+            move->node_id, move->new_parent_node_id, move->index};
+      } else if (const auto* remove = std::get_if<core::render::RemoveHost>(&operation)) {
+        result.operations[result.operation_count++] = mount::RemoveHost{remove->node_id};
       }
     }
     return core::RuntimeResult<mount::MountTransaction>::success(std::move(result));

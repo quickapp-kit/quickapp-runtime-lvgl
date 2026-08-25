@@ -1,5 +1,7 @@
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <string_view>
 
 #include <lvgl.h>
 
@@ -43,7 +45,7 @@ bool probe() {
   const auto bytes = qfont::systemDefaultFontBytes();
   CHECK(!bytes.empty());
   lv_font_t* native = lv_tiny_ttf_create_data_ex(
-      bytes.data(), bytes.size(), 40, LV_FONT_KERNING_NONE, 8);
+      bytes.data(), bytes.size(), 40, LV_FONT_KERNING_NONE, 2);
   CHECK(native != nullptr);
   lv_font_glyph_dsc_t glyph{};
   CHECK(lv_font_get_glyph_dsc(native, &glyph, 0x4e2d, 0));
@@ -86,6 +88,39 @@ bool probe() {
   CHECK(result.measured);
   CHECK(std::abs(result.width - glyph.adv_w) < 0.01);
   CHECK(std::abs(result.height - native->line_height) < 1.0);
+
+  // These are the characters added by the three Showcase applications. The
+  // measure path and LVGL TinyTTF must agree for every glyph, not only "中".
+  constexpr std::string_view kShowcaseGlyphs =
+      "一下不专事二今任休作例保做关内划刷号同后地天始容巡工已布常异录待"
+      "息扰排控摘日时显晨暂本板查样核检次正步段水注泵清版现留目看短确"
+      "示站第行被要计认议记载进醒重间阀项饮";
+  std::size_t cursor = 0;
+  while (cursor < kShowcaseGlyphs.size()) {
+    const std::size_t start = cursor;
+    const auto first = static_cast<std::uint8_t>(kShowcaseGlyphs[cursor++]);
+    CHECK((first & 0xf0U) == 0xe0U);
+    CHECK(cursor + 1 < kShowcaseGlyphs.size());
+    const auto second = static_cast<std::uint8_t>(kShowcaseGlyphs[cursor++]);
+    const auto third = static_cast<std::uint8_t>(kShowcaseGlyphs[cursor++]);
+    CHECK((second & 0xc0U) == 0x80U && (third & 0xc0U) == 0x80U);
+    const std::uint32_t code_point =
+        ((first & 0x0fU) << 12) | ((second & 0x3fU) << 6) | (third & 0x3fU);
+    lv_font_glyph_dsc_t showcase_glyph{};
+    CHECK(lv_font_get_glyph_dsc(native, &showcase_glyph, code_point, 0));
+    CHECK(lv_font_get_glyph_bitmap(&showcase_glyph, nullptr) != nullptr);
+    const qmeasure::MeasureRequest showcase_request{
+        "req:showcase-glyph", "srf:profile", "node:showcase-glyph", 1, 1,
+        qmeasure::MeasureRole::kText,
+        kShowcaseGlyphs.substr(start, cursor - start),
+        qfont::kSystemDefaultFontToken, 40, qfont::kSystemDefaultFontWeight,
+        {qmeasure::ConstraintKind::kUnconstrained, 0},
+        {qmeasure::ConstraintKind::kUnconstrained, 0}};
+    const auto showcase_measure = measure.measure(showcase_request);
+    CHECK(showcase_measure.measured);
+    CHECK(std::abs(showcase_measure.width - showcase_glyph.adv_w) < 0.01);
+    lv_font_glyph_release_draw_data(&showcase_glyph);
+  }
 
   publisher.closeAdmission();
   CHECK(publisher.tryFinalizeClose(kOwner).ok());

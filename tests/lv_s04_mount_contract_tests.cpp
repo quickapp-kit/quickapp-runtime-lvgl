@@ -98,6 +98,429 @@ class FontGenerationResults final
   void close() noexcept override {}
 };
 
+struct InputEvents final {
+  std::vector<qcore::package::EventType> types;
+  std::vector<std::string> values;
+
+  static void callback(void* context, const qcore::SurfaceId&, const qcore::NodeId&,
+                       qcore::package::EventType type, const char* value,
+                       std::uint64_t) noexcept {
+    auto* self = static_cast<InputEvents*>(context);
+    if (self == nullptr) return;
+    self->types.push_back(type);
+    self->values.emplace_back(value == nullptr ? "" : value);
+  }
+};
+
+struct SwitchEvents final {
+  std::vector<bool> values;
+
+  static void callback(void* context, const qcore::SurfaceId&, const qcore::NodeId&,
+                       bool checked, std::uint64_t) noexcept {
+    auto* self = static_cast<SwitchEvents*>(context);
+    if (self != nullptr) self->values.push_back(checked);
+  }
+};
+
+struct SliderEvents final {
+  std::vector<double> values;
+  std::vector<bool> from_user;
+
+  static void callback(void* context, const qcore::SurfaceId&, const qcore::NodeId&,
+                       double value, bool is_from_user, std::uint64_t) noexcept {
+    auto* self = static_cast<SliderEvents*>(context);
+    if (self == nullptr) return;
+    self->values.push_back(value);
+    self->from_user.push_back(is_from_user);
+  }
+};
+
+struct PickerEvents final {
+  std::vector<qlm::MountHost::PickerEvent> events;
+  std::vector<std::int32_t> selected;
+  std::vector<std::string> values;
+
+  static void callback(void* context, const qcore::SurfaceId&, const qcore::NodeId&,
+                       qlm::MountHost::PickerEvent event, std::int32_t selected,
+                       const char* value, std::uint64_t) noexcept {
+    auto* self = static_cast<PickerEvents*>(context);
+    if (self == nullptr) return;
+    self->events.push_back(event);
+    self->selected.push_back(selected);
+    self->values.emplace_back(value == nullptr ? "" : value);
+  }
+};
+
+bool testSliderAndPickerHostLifecycle() {
+  lv_init();
+  lv_display_t* display = lv_sdl_window_create(320, 240);
+  CHECK(display != nullptr);
+  lv_display_set_default(display);
+
+  qfake::FakeWakeup wakeup(kOwner);
+  std::array<qlf::OwnerTask, 64> task_storage{};
+  qlf::OwnerTaskQueue tasks(task_storage.data(), task_storage.size(), 64,
+                            &wakeup);
+  CHECK(tasks.bindOwner(kOwner).ok());
+  qls::LvglPageRootBackend page_roots(lv_screen_active());
+  qls::EmptySurfaceContentLifecycle content;
+  SurfaceResults surface_results;
+  qls::SurfaceHostAdapter surfaces(
+      tasks, kOwner, page_roots, content, surface_results,
+      qls::simulatorSurfaceHostLimits());
+  const auto surface_id = surface("srf:controls-002");
+  CHECK(surfaces.post(qls::CreateSurfaceHost{request("req:controls-002-create"),
+                                             surface_id, {320, 240}}));
+  CHECK(tasks.pump(kOwner, 16).ok());
+  CHECK(surfaces.service(kOwner, 16).error == qlf::LocalError::kNone);
+
+  qlm::LvglMountBackend lvgl_backend(page_roots);
+  MountResults mount_results;
+  qlm::MountHost mount(tasks, kOwner, surfaces, lvgl_backend, mount_results,
+                       qlm::simulatorMountHostLimits());
+  const auto root = node("node:controls-002-root");
+  const auto slider = node("node:controls-002-slider");
+  const auto picker = node("node:controls-002-picker");
+  qlm::MountTransaction transaction(
+      surface_id, 0, mountAttempt("mnt:controls-002"),
+      qlm::BoundedText::from("controls-002"), qlm::MountMode::kFull);
+  transaction.operations[0] =
+      qlm::CreateHost{root, qcore::package::HostComponentType::kView};
+  transaction.operations[1] =
+      qlm::CreateHost{slider, qcore::package::HostComponentType::kSlider};
+  transaction.operations[2] =
+      qlm::SetHostProp{slider, qlm::BoundedText::from("min"), 0.0};
+  transaction.operations[3] =
+      qlm::SetHostProp{slider, qlm::BoundedText::from("max"), 100.0};
+  transaction.operations[4] =
+      qlm::SetHostProp{slider, qlm::BoundedText::from("step"), 5.0};
+  transaction.operations[5] =
+      qlm::SetHostProp{slider, qlm::BoundedText::from("value"), 40.0};
+  transaction.operations[6] =
+      qlm::CreateHost{picker, qcore::package::HostComponentType::kPicker};
+  transaction.operations[7] =
+      qlm::SetHostProp{picker, qlm::BoundedText::from("mode"),
+                       qlm::BoundedText::from("text")};
+  transaction.operations[8] =
+      qlm::SetHostProp{picker, qlm::BoundedText::from("range"),
+                       qlm::BoundedText::from("安静|标准|性能")};
+  transaction.operations[9] =
+      qlm::SetHostProp{picker, qlm::BoundedText::from("selected"), 1.0};
+  transaction.operations[10] = qlm::SetHostLayout{root, {0, 0, 320, 240}};
+  transaction.operations[11] = qlm::SetHostLayout{slider, {16, 24, 288, 32}};
+  transaction.operations[12] = qlm::SetHostLayout{picker, {16, 80, 288, 40}};
+  transaction.operations[13] = qlm::InsertHostChild{slider, root, 0};
+  transaction.operations[14] = qlm::InsertHostChild{picker, root, 1};
+  transaction.operation_count = 15;
+  CHECK(mount.post(std::move(transaction)));
+  CHECK(mount.service(kOwner, 32).ok());
+  CHECK(mount_results.size() == 1);
+  CHECK(mount_results[0].status == qlm::MountResultStatus::kMounted);
+  CHECK(mount.liveObjectCount() == 3);
+
+  auto* slider_object = static_cast<lv_obj_t*>(mount.nativeObject(surface_id, slider));
+  auto* picker_object = static_cast<lv_obj_t*>(mount.nativeObject(surface_id, picker));
+  CHECK(slider_object != nullptr && picker_object != nullptr);
+  CHECK(lv_slider_get_value(slider_object) == 40000);
+  CHECK(lv_dropdown_get_selected(picker_object) == 1);
+  std::array<char, qlm::kMaxPropertyText> selected_text{};
+  lv_dropdown_get_selected_str(picker_object, selected_text.data(), selected_text.size());
+  CHECK(std::string(selected_text.data()) == "标准");
+
+  SliderEvents slider_events;
+  PickerEvents picker_events;
+  CHECK(mount.installSliderHandler(surface_id, slider,
+                                   &SliderEvents::callback, &slider_events));
+  CHECK(mount.installPickerHandler(surface_id, picker,
+                                   &PickerEvents::callback, &picker_events));
+
+  lv_slider_set_value(slider_object, 45000, LV_ANIM_OFF);
+  lv_obj_send_event(slider_object, LV_EVENT_VALUE_CHANGED, nullptr);
+  CHECK(slider_events.values.size() == 1);
+  CHECK(std::abs(slider_events.values.front() - 45.0) < 0.001);
+  CHECK(!slider_events.from_user.front());
+
+  CHECK(mount.confirmPicker(surface_id, picker));
+  CHECK(picker_events.events.size() == 2);
+  CHECK(picker_events.events[0] == qlm::MountHost::PickerEvent::kChange);
+  CHECK(picker_events.events[1] == qlm::MountHost::PickerEvent::kConfirm);
+  CHECK(picker_events.selected.back() == 1);
+  CHECK(picker_events.values.back() == "标准");
+
+  qlm::MountTransaction picker_update(
+      surface_id, 1, mountAttempt("mnt:controls-002-update"),
+      qlm::BoundedText::from("controls-002-update"), qlm::MountMode::kIncremental);
+  picker_update.operations[0] =
+      qlm::SetHostProp{picker, qlm::BoundedText::from("selected"), 2.0};
+  picker_update.operation_count = 1;
+  CHECK(mount.post(std::move(picker_update)));
+  CHECK(mount.service(kOwner, 16).ok());
+  CHECK(mount_results.size() == 2);
+  CHECK(mount_results[1].status == qlm::MountResultStatus::kMounted);
+  CHECK(lv_dropdown_get_selected(picker_object) == 2);
+  CHECK(mount.confirmPicker(surface_id, picker));
+  CHECK(picker_events.selected.back() == 2);
+  CHECK(picker_events.values.back() == "性能");
+  CHECK(mount.cancelPicker(surface_id, picker));
+  CHECK(picker_events.events.back() == qlm::MountHost::PickerEvent::kCancel);
+
+  CHECK(mount.releaseSurface(kOwner, surface_id).ok());
+  CHECK(mount.liveObjectCount() == 0);
+  CHECK(mount.liveFontCount() == 0);
+  CHECK(!mount.confirmPicker(surface_id, picker));
+  CHECK(!mount.cancelPicker(surface_id, picker));
+  mount.close();
+  CHECK(mount.finishClose(kOwner).ok());
+  surfaces.close();
+  CHECK(surfaces.finishClose(kOwner).ok());
+  CHECK(tasks.beginStop(kOwner, qlf::StopPolicy::kCancel).ok());
+  CHECK(tasks.finishStop(kOwner).ok());
+  lv_deinit();
+  return true;
+}
+
+struct ScrollEvents final {
+  std::vector<qcore::package::EventType> types;
+  std::vector<std::int32_t> offsets;
+  std::vector<std::int32_t> contents;
+  std::vector<std::int32_t> viewports;
+
+  static void callback(void* context, const qcore::SurfaceId&,
+                       const qcore::NodeId&, qcore::package::EventType type,
+                       std::int32_t offset, std::int32_t content,
+                       std::int32_t viewport, std::uint64_t) noexcept {
+    auto* self = static_cast<ScrollEvents*>(context);
+    if (self == nullptr) return;
+    self->types.push_back(type);
+    self->offsets.push_back(offset);
+    self->contents.push_back(content);
+    self->viewports.push_back(viewport);
+  }
+};
+
+bool testScrollAndListHostLifecycle() {
+  lv_init();
+  lv_display_t* display = lv_sdl_window_create(320, 240);
+  CHECK(display != nullptr);
+  lv_display_set_default(display);
+
+  qfake::FakeWakeup wakeup(kOwner);
+  std::array<qlf::OwnerTask, 64> task_storage{};
+  qlf::OwnerTaskQueue tasks(task_storage.data(), task_storage.size(), 64,
+                            &wakeup);
+  CHECK(tasks.bindOwner(kOwner).ok());
+  qls::LvglPageRootBackend page_roots(lv_screen_active());
+  qls::EmptySurfaceContentLifecycle content;
+  SurfaceResults surface_results;
+  qls::SurfaceHostAdapter surfaces(
+      tasks, kOwner, page_roots, content, surface_results,
+      qls::simulatorSurfaceHostLimits());
+  const auto surface_id = surface("srf:list-001");
+  CHECK(surfaces.post(qls::CreateSurfaceHost{request("req:list-create"),
+                                             surface_id, {320, 240}}));
+  CHECK(tasks.pump(kOwner, 16).ok());
+  CHECK(surfaces.service(kOwner, 16).error == qlf::LocalError::kNone);
+
+  qlm::LvglMountBackend lvgl_backend(page_roots);
+  MountResults mount_results;
+  qlm::MountHost mount(tasks, kOwner, surfaces, lvgl_backend, mount_results,
+                       qlm::simulatorMountHostLimits());
+  const auto root = node("node:list-root");
+  const auto scroll = node("node:list-scroll");
+  const auto list = node("node:list-content");
+  const auto item_a = node("node:list-a");
+  const auto item_b = node("node:list-b");
+  const auto item_c = node("node:list-c");
+  qlm::MountTransaction transaction(
+      surface_id, 0, mountAttempt("mnt:list-001"),
+      qlm::BoundedText::from("list-001"), qlm::MountMode::kFull);
+  transaction.operations[0] =
+      qlm::CreateHost{root, qcore::package::HostComponentType::kView};
+  transaction.operations[1] =
+      qlm::CreateHost{scroll, qcore::package::HostComponentType::kScroll};
+  transaction.operations[2] =
+      qlm::CreateHost{list, qcore::package::HostComponentType::kList};
+  transaction.operations[3] =
+      qlm::CreateHost{item_a, qcore::package::HostComponentType::kView};
+  transaction.operations[4] =
+      qlm::CreateHost{item_b, qcore::package::HostComponentType::kView};
+  transaction.operations[5] =
+      qlm::CreateHost{item_c, qcore::package::HostComponentType::kView};
+  transaction.operations[6] = qlm::SetHostLayout{root, {0, 0, 320, 240}};
+  transaction.operations[7] = qlm::SetHostLayout{scroll, {12, 12, 200, 80}};
+  transaction.operations[8] = qlm::SetHostLayout{list, {0, 0, 180, 240}};
+  transaction.operations[9] = qlm::SetHostLayout{item_a, {0, 0, 180, 70}};
+  transaction.operations[10] = qlm::SetHostLayout{item_b, {0, 80, 180, 70}};
+  transaction.operations[11] = qlm::SetHostLayout{item_c, {0, 160, 180, 70}};
+  transaction.operations[12] = qlm::InsertHostChild{scroll, root, 0};
+  transaction.operations[13] = qlm::InsertHostChild{list, scroll, 0};
+  transaction.operations[14] = qlm::InsertHostChild{item_a, list, 0};
+  transaction.operations[15] = qlm::InsertHostChild{item_b, list, 1};
+  transaction.operations[16] = qlm::InsertHostChild{item_c, list, 2};
+  transaction.operation_count = 17;
+  CHECK(mount.post(std::move(transaction)));
+  CHECK(mount.service(kOwner, 32).ok());
+  CHECK(mount_results.size() == 1);
+  CHECK(mount_results[0].status == qlm::MountResultStatus::kMounted);
+  CHECK(mount.liveObjectCount() == 6);
+
+  auto* scroll_object = static_cast<lv_obj_t*>(mount.nativeObject(surface_id, scroll));
+  auto* list_object = static_cast<lv_obj_t*>(mount.nativeObject(surface_id, list));
+  CHECK(scroll_object != nullptr && list_object != nullptr);
+  lv_obj_update_layout(lv_screen_active());
+  CHECK((lv_obj_get_scroll_dir(scroll_object) & LV_DIR_VER) != 0);
+  CHECK(lv_obj_get_height(scroll_object) == 80);
+  CHECK(lv_obj_get_height(list_object) == 240);
+  CHECK(lv_obj_get_scroll_bottom(scroll_object) > 0);
+
+  void* item_b_native = mount.nativeObject(surface_id, item_b);
+  qlm::MountTransaction move_item(
+      surface_id, 1, mountAttempt("mnt:list-001-move"),
+      qlm::BoundedText::from("list-001-move"), qlm::MountMode::kIncremental);
+  move_item.operations[0] = qlm::MoveHost{item_b, list, 0};
+  move_item.operation_count = 1;
+  CHECK(mount.post(std::move(move_item)));
+  CHECK(mount.service(kOwner, 16).ok());
+  CHECK(mount_results.size() == 2);
+  CHECK(mount_results[1].status == qlm::MountResultStatus::kMounted);
+  CHECK(mount.nativeObject(surface_id, item_b) == item_b_native);
+  CHECK(mount.liveObjectCount() == 6);
+
+  ScrollEvents events;
+  CHECK(mount.installScrollHandler(surface_id, scroll,
+                                   &ScrollEvents::callback, &events));
+  lv_obj_scroll_to_y(scroll_object, 100, LV_ANIM_OFF);
+  CHECK(lv_obj_get_scroll_y(scroll_object) > 0);
+  CHECK(!events.types.empty());
+  CHECK(events.offsets.back() > 0);
+  CHECK(events.contents.back() > events.viewports.back());
+  lv_obj_send_event(scroll_object, LV_EVENT_SCROLL_END, nullptr);
+  CHECK(std::find(events.types.begin(), events.types.end(),
+                  qcore::package::EventType::kScrollEnd) != events.types.end());
+
+  lv_obj_scroll_to_y(scroll_object, 0, LV_ANIM_OFF);
+  lv_obj_send_event(scroll_object, LV_EVENT_SCROLL, nullptr);
+  CHECK(std::find(events.types.begin(), events.types.end(),
+                  qcore::package::EventType::kScrollTop) != events.types.end());
+  const auto bottom = lv_obj_get_scroll_bottom(scroll_object);
+  lv_obj_scroll_to_y(scroll_object, bottom + lv_obj_get_scroll_y(scroll_object),
+                     LV_ANIM_OFF);
+  lv_obj_send_event(scroll_object, LV_EVENT_SCROLL, nullptr);
+  CHECK(std::find(events.types.begin(), events.types.end(),
+                  qcore::package::EventType::kScrollBottom) != events.types.end());
+
+  CHECK(mount.releaseSurface(kOwner, surface_id).ok());
+  CHECK(mount.liveObjectCount() == 0);
+  CHECK(mount.liveFontCount() == 0);
+  CHECK(!mount.installScrollHandler(surface_id, scroll,
+                                    &ScrollEvents::callback, &events));
+  mount.close();
+  CHECK(mount.finishClose(kOwner).ok());
+  surfaces.close();
+  CHECK(surfaces.finishClose(kOwner).ok());
+  CHECK(tasks.beginStop(kOwner, qlf::StopPolicy::kCancel).ok());
+  CHECK(tasks.finishStop(kOwner).ok());
+  lv_deinit();
+  return true;
+}
+
+bool testInputAndSwitchHostLifecycle() {
+  lv_init();
+  lv_display_t* display = lv_sdl_window_create(320, 240);
+  CHECK(display != nullptr);
+  lv_display_set_default(display);
+
+  qfake::FakeWakeup wakeup(kOwner);
+  std::array<qlf::OwnerTask, 64> task_storage{};
+  qlf::OwnerTaskQueue tasks(task_storage.data(), task_storage.size(), 64,
+                            &wakeup);
+  CHECK(tasks.bindOwner(kOwner).ok());
+  qls::LvglPageRootBackend page_roots(lv_screen_active());
+  qls::EmptySurfaceContentLifecycle content;
+  SurfaceResults surface_results;
+  qls::SurfaceHostAdapter surfaces(
+      tasks, kOwner, page_roots, content, surface_results,
+      qls::simulatorSurfaceHostLimits());
+  const auto surface_id = surface("srf:controls-001");
+  CHECK(surfaces.post(qls::CreateSurfaceHost{request("req:controls-create"),
+                                             surface_id, {320, 240}}));
+  CHECK(tasks.pump(kOwner, 16).ok());
+  CHECK(surfaces.service(kOwner, 16).error == qlf::LocalError::kNone);
+
+  qlm::LvglMountBackend lvgl_backend(page_roots);
+  MountResults mount_results;
+  qlm::MountHost mount(tasks, kOwner, surfaces, lvgl_backend, mount_results,
+                       qlm::simulatorMountHostLimits());
+  const auto root = node("node:controls-root");
+  const auto input = node("node:controls-input");
+  const auto toggle = node("node:controls-switch");
+  qlm::MountTransaction transaction(
+      surface_id, 0, mountAttempt("mnt:controls-001"),
+      qlm::BoundedText::from("controls-001"), qlm::MountMode::kFull);
+  transaction.operations[0] =
+      qlm::CreateHost{root, qcore::package::HostComponentType::kView};
+  transaction.operations[1] =
+      qlm::CreateHost{input, qcore::package::HostComponentType::kInput};
+  transaction.operations[2] =
+      qlm::SetHostProp{input, qlm::BoundedText::from("value"),
+                       qlm::BoundedText::from("QuickApp")};
+  transaction.operations[3] =
+      qlm::CreateHost{toggle, qcore::package::HostComponentType::kSwitch};
+  transaction.operations[4] =
+      qlm::SetHostProp{toggle, qlm::BoundedText::from("checked"), true};
+  transaction.operations[5] =
+      qlm::SetHostProp{toggle, qlm::BoundedText::from("enabled"), true};
+  transaction.operations[6] = qlm::SetHostLayout{root, {0, 0, 320, 240}};
+  transaction.operations[7] = qlm::SetHostLayout{input, {8, 8, 240, 38}};
+  transaction.operations[8] = qlm::SetHostLayout{toggle, {8, 56, 54, 30}};
+  transaction.operations[9] = qlm::InsertHostChild{input, root, 0};
+  transaction.operations[10] = qlm::InsertHostChild{toggle, root, 1};
+  transaction.operation_count = 11;
+  CHECK(mount.post(std::move(transaction)));
+  CHECK(mount.service(kOwner, 16).ok());
+  CHECK(mount_results.size() == 1);
+  CHECK(mount_results[0].status == qlm::MountResultStatus::kMounted);
+  CHECK(mount.liveObjectCount() == 3);
+
+  InputEvents input_events;
+  SwitchEvents switch_events;
+  CHECK(mount.installInputHandler(surface_id, input, &InputEvents::callback,
+                                  &input_events));
+  CHECK(mount.installSwitchHandler(surface_id, toggle, &SwitchEvents::callback,
+                                   &switch_events));
+  auto* input_object = static_cast<lv_obj_t*>(mount.nativeObject(surface_id, input));
+  auto* switch_object = static_cast<lv_obj_t*>(mount.nativeObject(surface_id, toggle));
+  CHECK(input_object != nullptr);
+  CHECK(switch_object != nullptr);
+  CHECK(std::string(lv_textarea_get_text(input_object)) == "QuickApp");
+  CHECK(lv_obj_has_state(switch_object, LV_STATE_CHECKED));
+
+  lv_obj_send_event(input_object, LV_EVENT_FOCUSED, nullptr);
+  lv_textarea_set_text(input_object, "Changed");
+  lv_obj_send_event(input_object, LV_EVENT_VALUE_CHANGED, nullptr);
+  CHECK(input_events.types.size() >= 3);
+  CHECK(input_events.types[0] == qcore::package::EventType::kFocus);
+  CHECK(input_events.types.back() == qcore::package::EventType::kChange);
+  CHECK(input_events.values.back() == "Changed");
+
+  lv_obj_clear_state(switch_object, LV_STATE_CHECKED);
+  lv_obj_send_event(switch_object, LV_EVENT_VALUE_CHANGED, nullptr);
+  CHECK(switch_events.values.size() == 1);
+  CHECK(!switch_events.values.front());
+
+  CHECK(mount.releaseSurface(kOwner, surface_id).ok());
+  CHECK(mount.liveObjectCount() == 0);
+  CHECK(mount.liveFontCount() == 0);
+  mount.close();
+  CHECK(mount.finishClose(kOwner).ok());
+  surfaces.close();
+  CHECK(surfaces.finishClose(kOwner).ok());
+  CHECK(tasks.beginStop(kOwner, qlf::StopPolicy::kCancel).ok());
+  CHECK(tasks.finishStop(kOwner).ok());
+  lv_deinit();
+  return true;
+}
+
 bool testCase001VisibleAndResources() {
   lv_init();
   lv_display_t* display = lv_sdl_window_create(320, 240);
@@ -399,7 +822,10 @@ bool testMountRejectionBackpressureAndClose() {
 
 int main() {
   return testCase001VisibleAndResources() &&
-                 testMountRejectionBackpressureAndClose()
+                 testMountRejectionBackpressureAndClose() &&
+                 testInputAndSwitchHostLifecycle() &&
+                 testSliderAndPickerHostLifecycle() &&
+                 testScrollAndListHostLifecycle()
              ? 0
              : 1;
 }

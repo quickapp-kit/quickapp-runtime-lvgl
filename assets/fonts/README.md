@@ -4,7 +4,12 @@
 It is a deterministic subset of LVGL's vendored
 `NotoSansSC-Regular.ttf`, limited to ASCII and the code points listed in
 `system-default-cjk-glyphs.txt`. The list includes the full text corpus used
-by the Case 001 Demo and DemoDetail pages.
+by the Case 001, LVGL P0 baseline, Gallery-001, Consumer-001, and
+Wearable-001 pages.
+
+Showcase additions are kept as a separate auditable line in
+`system-default-cjk-glyphs.txt`; this remains a controlled subset rather than
+a complete CJK font.
 
 Generation command:
 

@@ -213,7 +213,7 @@ bool testCoreTypedMountToPresent() {
   auto owner = component("cmp:core-bridge-page");
   CHECK(coordinator->submit(qcore::render::InitialRenderIntent{
       surface_id, request("req:j-instantiate"), std::move(owner), fixture.page,
-      {}, {320, 240}, {}}));
+      {}, {320, 240}, {}, {}}));
   CHECK(mounts.service(kOwner, 32).ok());
   CHECK(surfaces.service(kOwner, 32).error == qlf::LocalError::kNone);
   CHECK(initial_results_raw->entries.size() == 1);

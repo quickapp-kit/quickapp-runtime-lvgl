@@ -75,8 +75,8 @@ LV-S04 的 M1-Alpha Mount Adapter 已完成：真实 LVGL/SDL window、S03 page 
 
 | 项目 | 固定事实 | 证据 |
 |---|---|---|
-| 字体身份 | token=`system-default`、weight=400、digest=`5d99238d1f9493227eeaf535e5f9d93634bd177c7b032fb171d69e96a9969f71` | `include/quickapp/lvgl/font/system_default_font_asset.h`、`src/font/system_default_font_asset.cpp`、`assets/fonts/README.md` |
-| 字体资产 | `assets/fonts/NotoSansSC-Alpha.ttf`，约 47 KiB，来自仓库内 LVGL Noto Sans SC TrueType 原始资产；只包含声明的 ASCII 与 Case 001 CJK 字符 | `assets/fonts/system-default-cjk-glyphs.txt`、CMake `quickapp_lvgl_font_asset` |
+| 字体身份 | token=`system-default`、weight=400、digest=`8d29e294f21b8cf18760e8b0abeda5bc4e88acda8a8d899034d5bd298523434f` | `include/quickapp/lvgl/font/system_default_font_asset.h`、`src/font/system_default_font_asset.cpp`、`assets/fonts/README.md` |
+| 字体资产 | `assets/fonts/NotoSansSC-Alpha.ttf`，约 49 KiB，来自仓库内 LVGL Noto Sans SC TrueType 原始资产；只包含声明的 ASCII 与 Case 001/P0 CJK 字符 | `assets/fonts/system-default-cjk-glyphs.txt`、CMake `quickapp_lvgl_font_asset` |
 | fontSize 映射 | 1..256 的整数字号；当前 Case 001 使用 40px/30px；固定容量字体表按字号复用 | `MountHost::acquireFont`、S04 mount contract test |
 | 线程 | 字体创建、LVGL style 赋值和释放全部在 Mount owner thread | `MountHost::service`、owner-thread assertions |
 | Measure 一致性 | 同一 digest；40px 的 `中` 实际 advance 与 S06 `FontMeasureAdapter` width 相等；height 差值小于 1px | mount contract test、font profile probe |
