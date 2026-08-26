@@ -325,9 +325,13 @@ bool MountHost::resizeImageForLayout(HostSlot& slot, void* native_object) noexce
   return updateImageDescriptor(slot, object, width, height);
 }
 
-MountHostLimits simulatorMountHostLimits() noexcept { return {16, 512, 256, 16}; }
+MountHostLimits simulatorMountHostLimits() noexcept {
+  return {16, 512, 256, 16, 512 * 1024, 16};
+}
 
-MountHostLimits embeddedMountHostLimits() noexcept { return {4, 64, 16, 4}; }
+MountHostLimits embeddedMountHostLimits() noexcept {
+  return {4, 64, 16, 4, 512 * 1024, 4};
+}
 
 MountHost::MountHost(foundation::OwnerTaskQueue& owner_tasks,
                      foundation::OwnerToken owner,
@@ -340,12 +344,16 @@ MountHost::MountHost(foundation::OwnerTaskQueue& owner_tasks,
       roots_(roots),
       results_(results),
       limits_(limits) {
+  if (limits_.max_batch_queue_depth == 0) {
+    limits_.max_batch_queue_depth = limits_.max_transactions;
+  }
   if (!owner_.valid() || limits_.max_transactions == 0 ||
       limits_.max_transactions > kStorageCapacity ||
       limits_.max_host_objects == 0 || limits_.max_host_objects > objects_.size() ||
       limits_.max_operations == 0 || limits_.max_operations > kMaxMountOperations ||
       limits_.max_font_instances == 0 ||
-      limits_.max_font_instances > fonts_.size()) {
+      limits_.max_font_instances > fonts_.size() || limits_.max_batch_bytes == 0 ||
+      limits_.max_batch_queue_depth > limits_.max_transactions) {
     accepting_.store(false, std::memory_order_release);
   }
 }
@@ -833,6 +841,12 @@ bool MountHost::preflight(const MountTransaction& transaction,
                           surface::PageRootHandle*) noexcept {
   if (transaction.operation_count == 0 || transaction.source_id.truncated ||
       transaction.operation_count > limits_.max_operations ||
+      transaction.batch_count == 0 ||
+      transaction.batch_index >= transaction.batch_count ||
+      transaction.is_final !=
+          (transaction.batch_index + 1 == transaction.batch_count) ||
+      (transaction.batch_count > 1 && transaction.mode == MountMode::kFull &&
+       transaction.batch_index != 0) ||
       transaction.source_id.size == 0 || transaction.source_id.size > kMaxPropertyText) {
     return false;
   }
@@ -914,7 +928,9 @@ bool MountHost::preflight(const MountTransaction& transaction,
             valid = existsOrCreated(value.node_id, index) && value.rect.width >= 0 &&
                     value.rect.height >= 0;
           } else if constexpr (std::is_same_v<Value, InsertHostChild>) {
-            valid = createdBefore(value.node_id, index) &&
+            valid = (createdBefore(value.node_id, index) ||
+                     (transaction.batch_index > 0 &&
+                      findSlot(transaction.surface_id, value.node_id).has_value())) &&
                     existsOrCreated(value.parent_node_id, index);
           } else if constexpr (std::is_same_v<Value, MoveHost>) {
             const auto child_slot =
@@ -950,11 +966,19 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
   MountResult result{transaction.surface_id, transaction.revision,
                      transaction.mount_attempt_id, transaction.source_id,
                      MountResultStatus::kFailed, std::nullopt,
-                     liveObjectCountForSurface(transaction.surface_id)};
+                     liveObjectCountForSurface(transaction.surface_id),
+                     transaction.batch_index, transaction.batch_count,
+                     transaction.is_final};
   void* root = nullptr;
   const char* failure_reason = "mount commit failed";
   if (!resolveRoot(transaction.surface_id, root).ok() ||
       !preflight(transaction, nullptr)) {
+    if (transaction.batch_count > 1) {
+      // A failed batch belongs to one logical hidden mount. Do not leave the
+      // objects created by earlier batches attached to the staging root.
+      destroySurfaceObjects(transaction.surface_id);
+      result.live_objects = 0;
+    }
     result.error = error(RuntimeErrorCode::kPlatformRejected,
                          "mount preflight rejected");
     return result;
@@ -1419,6 +1443,18 @@ core::EnqueueResult MountHost::post(MountTransaction&& transaction) noexcept {
   if (index == limits_.max_transactions) {
     return core::EnqueueResult::failure(
         error(RuntimeErrorCode::kQueueOverflow, "mount transaction capacity is full"));
+  }
+  const std::size_t estimated_bytes =
+      sizeof(MountTransaction) +
+      transaction.operations.capacity() * sizeof(MountOperation) +
+      transaction.source_id.size;
+  if (estimated_bytes > limits_.max_batch_bytes) {
+    return core::EnqueueResult::failure(error(
+        RuntimeErrorCode::kOutOfMemory, "mount batch memory budget exceeded"));
+  }
+  if (pendingCount() >= limits_.max_batch_queue_depth) {
+    return core::EnqueueResult::failure(error(
+        RuntimeErrorCode::kQueueOverflow, "mount batch queue depth is full", true));
   }
   transactions_[index].occupied = true;
   transactions_[index].transaction.emplace(std::move(transaction));

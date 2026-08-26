@@ -25,6 +25,9 @@ struct MountHostLimits final {
   std::size_t max_host_objects{0};
   std::size_t max_operations{0};
   std::size_t max_font_instances{0};
+  // Bounds one queued platform batch independently from the operation cap.
+  std::size_t max_batch_bytes{32 * 1024};
+  std::size_t max_batch_queue_depth{0};
 };
 
 [[nodiscard]] MountHostLimits simulatorMountHostLimits() noexcept;
@@ -65,6 +68,9 @@ class MountHost final : public core::PlatformMountPort<MountTransaction> {
   [[nodiscard]] std::size_t liveObjectCount() const noexcept;
   [[nodiscard]] std::size_t liveFontCount() const noexcept;
   [[nodiscard]] std::size_t pendingCount() const noexcept;
+  [[nodiscard]] std::size_t batchQueueDepth() const noexcept {
+    return pendingCount();
+  }
   [[nodiscard]] std::optional<core::NodeId> nodeAt(
       const core::SurfaceId& surface_id, std::int32_t x,
       std::int32_t y) const noexcept;

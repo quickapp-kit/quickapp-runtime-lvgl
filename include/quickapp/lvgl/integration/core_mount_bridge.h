@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstddef>
 #include <optional>
+#include <vector>
 
 #include "quickapp/core/foundation/observation.h"
 #include "quickapp/core/foundation/port.h"
@@ -19,6 +20,11 @@ class CoreMountBridge final : public core::render::MountPort,
                               public mount::MountResultSink {
  public:
   static constexpr std::size_t kCapacity = mount::MountHost::kStorageCapacity;
+  static constexpr std::size_t kMaxBatchCount = 64;
+  // MountOperation currently carries bounded text inline; two full batches
+  // must fit without making the retained transaction pool unbounded.
+  static constexpr std::size_t kMaxRetainedBatchBytes = 2 * 1024 * 1024;
+  static constexpr std::size_t kMaxPendingBatchQueueDepth = kCapacity;
 
   CoreMountBridge(
       foundation::OwnerToken owner,
@@ -47,6 +53,10 @@ class CoreMountBridge final : public core::render::MountPort,
   [[nodiscard]] foundation::LocalResult service(
       foundation::OwnerToken caller, std::size_t budget = kCapacity) noexcept;
   [[nodiscard]] std::size_t pendingCount() const noexcept;
+  [[nodiscard]] std::size_t pendingBatchCount() const noexcept;
+  [[nodiscard]] std::size_t retainedBatchBytes() const noexcept {
+    return retained_batch_bytes_;
+  }
   [[nodiscard]] bool closed() const noexcept {
     return closed_.load(std::memory_order_acquire);
   }
@@ -57,6 +67,7 @@ class CoreMountBridge final : public core::render::MountPort,
     kPresentPending,
     kPresentPosted,
     kCoreResultPending,
+    kRollbackPending,
   };
 
   struct Pending final {
@@ -68,7 +79,13 @@ class CoreMountBridge final : public core::render::MountPort,
         core::MountAttemptId::parse("mnt:invalid").value();
     std::uint64_t revision{0};
     std::size_t operation_count{0};
+    std::size_t retained_batch_bytes{0};
+    std::uint32_t active_batch_index{0};
+    std::uint32_t batch_count{1};
+    std::size_t next_batch{0};
+    std::vector<mount::MountTransaction> batches;
     bool full_mount{false};
+    bool active_batch_final{true};
     Phase phase{Phase::kMountPending};
     bool result_mounted{false};
     std::optional<core::RuntimeError> result_error;
@@ -79,13 +96,16 @@ class CoreMountBridge final : public core::render::MountPort,
       const core::MountAttemptId& mount_attempt_id,
       const core::render::RenderSourceId& source_id) const noexcept;
   [[nodiscard]] std::optional<std::size_t> free() const noexcept;
-  [[nodiscard]] core::RuntimeResult<mount::MountTransaction> convert(
+  [[nodiscard]] core::RuntimeResult<std::vector<mount::MountTransaction>> convert(
       const core::render::MountTransaction& transaction) const noexcept;
+  [[nodiscard]] core::EnqueueResult postBatch(std::size_t index) noexcept;
   [[nodiscard]] core::EnqueueResult tryPresent(std::size_t index) noexcept;
   [[nodiscard]] core::EnqueueResult tryCoreResult(std::size_t index) noexcept;
   void emitPresent(core::MarkerName marker, const Pending& pending,
                    std::optional<core::RuntimeErrorCode> error = std::nullopt) noexcept;
   void clear(std::size_t index) noexcept;
+  [[nodiscard]] static std::size_t estimateBatchBytes(
+      const std::vector<mount::MountTransaction>& batches) noexcept;
 
   foundation::OwnerToken owner_{};
   core::CoreIngressPort<core::render::MountTransactionResult>& results_;
@@ -96,6 +116,7 @@ class CoreMountBridge final : public core::render::MountPort,
   core::CoreIngressPort<surface::SurfaceResult>* passthrough_{nullptr};
   foundation::AtomicTryCriticalSection admission_{};
   std::array<Pending, kCapacity> pending_{};
+  std::size_t retained_batch_bytes_{0};
   std::atomic<bool> accepting_{true};
   std::atomic<bool> closed_{false};
 };

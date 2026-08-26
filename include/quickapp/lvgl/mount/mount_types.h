@@ -15,6 +15,7 @@
 
 namespace quickapp::lvgl::mount {
 
+// Maximum operations in one platform batch. This is not a Runtime Node limit.
 inline constexpr std::size_t kMaxMountOperations = 256;
 inline constexpr std::size_t kMaxPropertyText = 512;
 
@@ -92,6 +93,10 @@ struct MountTransaction final {
   MountMode mode{MountMode::kIncremental};
   std::vector<MountOperation> operations;
   std::size_t operation_count{0};
+  // A logical Core Mount may be delivered as ordered bounded batches.
+  std::uint32_t batch_index{0};
+  std::uint32_t batch_count{1};
+  bool is_final{true};
 };
 
 enum class MountResultStatus : std::uint8_t { kMounted, kFailed };
@@ -104,6 +109,9 @@ struct MountResult final {
   MountResultStatus status{MountResultStatus::kFailed};
   std::optional<core::RuntimeError> error;
   std::size_t live_objects{0};
+  std::uint32_t batch_index{0};
+  std::uint32_t batch_count{1};
+  bool is_final{true};
 };
 
 class MountResultSink {

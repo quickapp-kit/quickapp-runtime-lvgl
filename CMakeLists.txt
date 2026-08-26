@@ -154,9 +154,10 @@ if(QUICKAPP_LVGL_BUILD_S02)
     endif()
 
     if(QUICKAPP_LVGL_BUILD_S04)
-      add_library(quickapp_lvgl_mount_host STATIC
-        src/integration/core_mount_bridge.cpp
-        src/mount/mount_types.cpp
+  add_library(quickapp_lvgl_mount_host STATIC
+    src/integration/core_mount_bridge.cpp
+    src/list/virtual_list.cpp
+    src/mount/mount_types.cpp
         src/mount/mount_host.cpp
         src/mount/lvgl_mount_backend.cpp)
       target_include_directories(quickapp_lvgl_mount_host PUBLIC include)
@@ -167,15 +168,23 @@ if(QUICKAPP_LVGL_BUILD_S02)
       quickapp_lvgl_configure(quickapp_lvgl_mount_host)
 
       if(QUICKAPP_LVGL_BUILD_TESTS)
-        add_executable(lv_b35_tabs_mount_tests
+      add_executable(lv_b35_tabs_mount_tests
           tests/lv_b35_tabs_mount_tests.cpp)
         target_link_libraries(lv_b35_tabs_mount_tests PRIVATE
           quickapp_lvgl_mount_host quickapp_lvgl_foundation_fakes lvgl)
         quickapp_lvgl_configure(lv_b35_tabs_mount_tests)
         add_test(NAME lv_b35_tabs_mount_tests
                  COMMAND lv_b35_tabs_mount_tests)
-        set_tests_properties(lv_b35_tabs_mount_tests PROPERTIES
+      set_tests_properties(lv_b35_tabs_mount_tests PROPERTIES
           ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+
+      add_executable(lv_s08_virtual_list_tests
+        tests/lv_s08_virtual_list_tests.cpp)
+      target_link_libraries(lv_s08_virtual_list_tests PRIVATE
+        quickapp_lvgl_mount_host quickapp_lvgl_foundation)
+      quickapp_lvgl_configure(lv_s08_virtual_list_tests)
+      add_test(NAME lv_s08_virtual_list_tests
+               COMMAND lv_s08_virtual_list_tests)
       endif()
     endif()
   endif()
@@ -333,6 +342,20 @@ if(QUICKAPP_LVGL_BUILD_TESTS)
       add_test(NAME lv_s04_core_mount_integration_tests
         COMMAND lv_s04_core_mount_integration_tests)
       set_tests_properties(lv_s04_core_mount_integration_tests PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy")
+
+      add_executable(lv_s07_batched_mount_tests
+        tests/lv_s07_batched_mount_tests.cpp)
+      target_link_libraries(lv_s07_batched_mount_tests PRIVATE
+        quickapp_lvgl_mount_host quickapp_lvgl_surface_host
+        quickapp_lvgl_foundation_fakes Threads::Threads lvgl::lvgl
+        PkgConfig::SDL3)
+      target_compile_definitions(lv_s07_batched_mount_tests PRIVATE
+        CONFIG_LV_USE_SDL=1)
+      quickapp_lvgl_configure(lv_s07_batched_mount_tests)
+      add_test(NAME lv_s07_batched_mount_tests
+        COMMAND lv_s07_batched_mount_tests)
+      set_tests_properties(lv_s07_batched_mount_tests PROPERTIES
         ENVIRONMENT "SDL_VIDEODRIVER=dummy")
     endif()
     add_test(

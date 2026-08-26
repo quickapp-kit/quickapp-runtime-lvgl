@@ -1,5 +1,6 @@
 #include "quickapp/lvgl/integration/core_mount_bridge.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string_view>
@@ -110,42 +111,68 @@ std::optional<std::size_t> CoreMountBridge::free() const noexcept {
   return std::nullopt;
 }
 
-core::RuntimeResult<mount::MountTransaction> CoreMountBridge::convert(
+core::RuntimeResult<std::vector<mount::MountTransaction>> CoreMountBridge::convert(
     const core::render::MountTransaction& transaction) const noexcept {
   if (transaction.operations.empty() ||
-      transaction.operations.size() > mount::kMaxMountOperations) {
-    return core::RuntimeResult<mount::MountTransaction>::failure(error(
-        RuntimeErrorCode::kQueueOverflow, "Core Mount transaction exceeds LVGL bound"));
+      (transaction.mode == core::render::MountMode::kIncremental &&
+       transaction.operations.size() > mount::kMaxMountOperations) ||
+      transaction.operations.size() >
+          static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) *
+              mount::kMaxMountOperations) {
+    return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(error(
+        RuntimeErrorCode::kQueueOverflow, "Core Mount transaction exceeds batch capacity"));
+  }
+  const auto batch_count = transaction.mode == core::render::MountMode::kIncremental
+                               ? 1
+                               : (transaction.operations.size() +
+                                  mount::kMaxMountOperations - 1) /
+                                     mount::kMaxMountOperations;
+  if (batch_count == 0 ||
+      batch_count > kMaxBatchCount ||
+      batch_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(error(
+        RuntimeErrorCode::kQueueOverflow, "Core Mount batch count exceeds LVGL bound"));
   }
   auto source = text(core::render::render_source_wire(transaction.source_id));
   if (!source) {
-    return core::RuntimeResult<mount::MountTransaction>::failure(source.error());
+    return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(source.error());
   }
   if (source.value().size == 0) {
-    return core::RuntimeResult<mount::MountTransaction>::failure(error(
+    return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(error(
         RuntimeErrorCode::kAbiInvalidArgument, "Core mount source id is empty"));
   }
   try {
-    mount::MountTransaction result(
-        transaction.surface_id, transaction.revision, transaction.mount_attempt_id,
-        std::move(source).value(),
-        transaction.mode == core::render::MountMode::kFull
-            ? mount::MountMode::kFull
-            : mount::MountMode::kIncremental);
-    for (const MountOperation& operation : transaction.operations) {
+    std::vector<mount::MountTransaction> result;
+    result.reserve(batch_count);
+    for (std::size_t batch_index = 0; batch_index < batch_count; ++batch_index) {
+      const auto begin = batch_index * mount::kMaxMountOperations;
+      const auto end = std::min(transaction.operations.size(),
+                                begin + mount::kMaxMountOperations);
+      mount::MountTransaction batch(
+          transaction.surface_id, transaction.revision, transaction.mount_attempt_id,
+          source.value(),
+          transaction.mode == core::render::MountMode::kFull && batch_index == 0
+              ? mount::MountMode::kFull
+              : mount::MountMode::kIncremental);
+      batch.batch_index = static_cast<std::uint32_t>(batch_index);
+      batch.batch_count = static_cast<std::uint32_t>(batch_count);
+      batch.is_final = batch_index + 1 == batch_count;
+      for (std::size_t operation_index = begin; operation_index < end;
+           ++operation_index) {
+        const MountOperation& operation = transaction.operations[operation_index];
       if (const auto* create = std::get_if<core::render::CreateHost>(&operation)) {
-        result.operations[result.operation_count++] =
+        batch.operations[batch.operation_count++] =
             mount::CreateHost{create->node_id, create->type};
       } else if (const auto* prop = std::get_if<core::render::SetHostProp>(&operation)) {
         auto name = text(prop->name);
         if (!name) {
-          return core::RuntimeResult<mount::MountTransaction>::failure(name.error());
+          return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(name.error());
         }
         auto value = property(prop->name, prop->value);
         if (!value) {
-          return core::RuntimeResult<mount::MountTransaction>::failure(value.error());
+          return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(value.error());
         }
-        result.operations[result.operation_count++] = mount::SetHostProp{
+        batch.operations[batch.operation_count++] = mount::SetHostProp{
             prop->node_id, std::move(name).value(), std::move(value).value()};
       } else if (const auto* layout = std::get_if<core::render::SetHostLayout>(&operation)) {
         const auto& rect = layout->rect;
@@ -155,26 +182,31 @@ core::RuntimeResult<mount::MountTransaction> CoreMountBridge::convert(
             rect.y > std::numeric_limits<std::int32_t>::max() ||
             rect.width < 0 || rect.width > std::numeric_limits<std::int32_t>::max() ||
             rect.height < 0 || rect.height > std::numeric_limits<std::int32_t>::max()) {
-          return core::RuntimeResult<mount::MountTransaction>::failure(error(
+          return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(error(
               RuntimeErrorCode::kAbiInvalidArgument, "Core layout is outside LVGL bounds"));
         }
-        result.operations[result.operation_count++] = mount::SetHostLayout{
+        batch.operations[batch.operation_count++] = mount::SetHostLayout{
             layout->node_id,
             {static_cast<std::int32_t>(rect.x), static_cast<std::int32_t>(rect.y),
              static_cast<std::int32_t>(rect.width), static_cast<std::int32_t>(rect.height)}};
       } else if (const auto* insert = std::get_if<core::render::InsertHostChild>(&operation)) {
-        result.operations[result.operation_count++] = mount::InsertHostChild{
+        batch.operations[batch.operation_count++] = mount::InsertHostChild{
             insert->node_id, insert->parent_node_id, insert->index};
       } else if (const auto* move = std::get_if<core::render::MoveHost>(&operation)) {
-        result.operations[result.operation_count++] = mount::MoveHost{
+        batch.operations[batch.operation_count++] = mount::MoveHost{
             move->node_id, move->new_parent_node_id, move->index};
       } else if (const auto* remove = std::get_if<core::render::RemoveHost>(&operation)) {
-        result.operations[result.operation_count++] = mount::RemoveHost{remove->node_id};
+        batch.operations[batch.operation_count++] = mount::RemoveHost{remove->node_id};
       }
+      }
+      batch.operations.resize(batch.operation_count);
+      batch.operations.shrink_to_fit();
+      result.emplace_back(std::move(batch));
     }
-    return core::RuntimeResult<mount::MountTransaction>::success(std::move(result));
+    return core::RuntimeResult<std::vector<mount::MountTransaction>>::success(
+        std::move(result));
   } catch (...) {
-    return core::RuntimeResult<mount::MountTransaction>::failure(
+    return core::RuntimeResult<std::vector<mount::MountTransaction>>::failure(
         error(RuntimeErrorCode::kOutOfMemory, "Core Mount transaction adaptation failed"));
   }
 }
@@ -188,6 +220,12 @@ core::EnqueueResult CoreMountBridge::post(
   }
   auto converted = convert(transaction);
   if (!converted) return core::EnqueueResult::failure(converted.error());
+  const auto batches = std::move(converted).value();
+  const std::size_t retained_bytes = estimateBatchBytes(batches);
+  if (retained_bytes > kMaxRetainedBatchBytes) {
+    return core::EnqueueResult::failure(error(
+        RuntimeErrorCode::kOutOfMemory, "Core Mount batch memory budget exceeded"));
+  }
   foundation::TryCriticalSectionGuard guard(admission_);
   if (!guard.acquired()) {
     return core::EnqueueResult::failure(
@@ -198,6 +236,11 @@ core::EnqueueResult CoreMountBridge::post(
     return core::EnqueueResult::failure(
         error(RuntimeErrorCode::kQueueOverflow, "Core Mount bridge capacity is full"));
   }
+  if (pendingBatchCount() >= kMaxPendingBatchQueueDepth ||
+      retained_bytes > kMaxRetainedBatchBytes - retained_batch_bytes_) {
+    return core::EnqueueResult::failure(error(
+        RuntimeErrorCode::kQueueOverflow, "Core Mount batch backpressure", true));
+  }
   Pending& pending = pending_[*slot];
   pending.occupied = true;
   pending.surface_id = transaction.surface_id;
@@ -205,16 +248,55 @@ core::EnqueueResult CoreMountBridge::post(
   pending.mount_attempt_id = transaction.mount_attempt_id;
   pending.revision = transaction.revision;
   pending.operation_count = transaction.operations.size();
+  pending.batches = batches;
+  pending.retained_batch_bytes = retained_bytes;
+  retained_batch_bytes_ += retained_bytes;
+  pending.batch_count = static_cast<std::uint32_t>(pending.batches.size());
+  pending.next_batch = 0;
+  pending.active_batch_index = 0;
   pending.full_mount = transaction.mode == core::render::MountMode::kFull;
   pending.phase = Phase::kMountPending;
   pending.result_error.reset();
   pending.result_mounted = false;
-  auto posted = mounts_->post(std::move(converted).value());
+  auto posted = postBatch(*slot);
   if (!posted) {
     clear(*slot);
     return posted;
   }
   return core::EnqueueResult::success(core::Accepted{});
+}
+
+core::EnqueueResult CoreMountBridge::postBatch(std::size_t index) noexcept {
+  if (index >= pending_.size() || !pending_[index].occupied || mounts_ == nullptr) {
+    return core::EnqueueResult::failure(
+        error(RuntimeErrorCode::kAbiInvalidArgument, "Mount batch slot is invalid"));
+  }
+  Pending& pending = pending_[index];
+  if (pending.next_batch >= pending.batches.size()) {
+    return core::EnqueueResult::failure(
+        error(RuntimeErrorCode::kAbiInvalidArgument, "Mount batch sequence is exhausted"));
+  }
+  auto& batch = pending.batches[pending.next_batch];
+  pending.active_batch_index = batch.batch_index;
+  pending.active_batch_final = batch.is_final;
+  pending.operation_count = batch.operation_count;
+  // Keep the retained batch intact when a bounded owner queue rejects the
+  // post. The next owner pump must be able to retry the same batch.
+  const auto posted = mounts_->post(mount::MountTransaction(batch));
+  if (posted) {
+    ++pending.next_batch;
+    pending.phase = Phase::kMountPending;
+    return posted;
+  }
+  if (posted.error().retryable ||
+      posted.error().code == RuntimeErrorCode::kQueueOverflow) {
+    pending.phase = Phase::kMountPending;
+    return posted;
+  }
+  pending.result_mounted = false;
+  pending.result_error = posted.error();
+  pending.phase = Phase::kRollbackPending;
+  return posted;
 }
 
 void CoreMountBridge::complete(mount::MountResult result) noexcept {
@@ -231,12 +313,20 @@ void CoreMountBridge::complete(mount::MountResult result) noexcept {
   }
   if (!slot.has_value()) return;
   Pending& pending = pending_[*slot];
+  if (result.batch_index != pending.active_batch_index ||
+      result.batch_count != pending.batch_count) {
+    return;
+  }
   if (result.status == mount::MountResultStatus::kFailed) {
     pending.result_mounted = false;
     pending.result_error = result.error.value_or(
         error(RuntimeErrorCode::kPlatformRejected, "LVGL Mount failed"));
-    pending.phase = Phase::kCoreResultPending;
-    (void)tryCoreResult(*slot);
+    pending.phase = Phase::kRollbackPending;
+    return;
+  }
+
+  if (!pending.active_batch_final) {
+    (void)postBatch(*slot);
     return;
   }
   if (!pending.full_mount) {
@@ -357,7 +447,22 @@ foundation::LocalResult CoreMountBridge::service(foundation::OwnerToken caller,
   std::size_t attempted = 0;
   for (std::size_t index = 0; index < pending_.size() && attempted < budget; ++index) {
     if (!pending_[index].occupied) continue;
-    if (pending_[index].phase == Phase::kPresentPending) {
+    if (pending_[index].phase == Phase::kMountPending &&
+        pending_[index].next_batch < pending_[index].batches.size()) {
+      (void)postBatch(index);
+      ++attempted;
+    } else if (pending_[index].phase == Phase::kRollbackPending && mounts_ != nullptr) {
+      const auto rollback = mounts_->releaseSurface(owner_, pending_[index].surface_id);
+      if (rollback.ok()) {
+        if (!pending_[index].result_error.has_value()) {
+          pending_[index].result_error = error(
+              RuntimeErrorCode::kPlatformRejected, "LVGL Mount batch failed");
+        }
+        pending_[index].phase = Phase::kCoreResultPending;
+        (void)tryCoreResult(index);
+      }
+      ++attempted;
+    } else if (pending_[index].phase == Phase::kPresentPending) {
       (void)tryPresent(index);
       ++attempted;
     } else if (pending_[index].phase == Phase::kCoreResultPending) {
@@ -378,6 +483,30 @@ std::size_t CoreMountBridge::pendingCount() const noexcept {
   std::size_t count = 0;
   for (const Pending& pending : pending_) count += pending.occupied ? 1U : 0U;
   return count;
+}
+
+std::size_t CoreMountBridge::pendingBatchCount() const noexcept {
+  std::size_t count = 0;
+  for (const Pending& pending : pending_) {
+    if (pending.occupied) count += pending.batches.size() - pending.next_batch;
+  }
+  return count;
+}
+
+std::size_t CoreMountBridge::estimateBatchBytes(
+    const std::vector<mount::MountTransaction>& batches) noexcept {
+  std::size_t total = 0;
+  for (const auto& batch : batches) {
+    const std::size_t batch_bytes = sizeof(mount::MountTransaction) +
+                                    batch.operations.capacity() *
+                                        sizeof(mount::MountOperation) +
+                                    batch.source_id.size;
+    if (batch_bytes > std::numeric_limits<std::size_t>::max() - total) {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    total += batch_bytes;
+  }
+  return total;
 }
 
 void CoreMountBridge::emitPresent(core::MarkerName marker, const Pending& pending,
@@ -405,7 +534,13 @@ void CoreMountBridge::emitPresent(core::MarkerName marker, const Pending& pendin
 }
 
 void CoreMountBridge::clear(std::size_t index) noexcept {
-  if (index < pending_.size()) pending_[index] = Pending{};
+  if (index < pending_.size()) {
+    const auto retained = pending_[index].retained_batch_bytes;
+    retained_batch_bytes_ = retained_batch_bytes_ >= retained
+                                ? retained_batch_bytes_ - retained
+                                : 0;
+    pending_[index] = Pending{};
+  }
 }
 
 }  // namespace quickapp::lvgl::integration
