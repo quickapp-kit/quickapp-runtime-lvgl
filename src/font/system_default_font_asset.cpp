@@ -6,7 +6,7 @@ namespace {
 #include "system_default_font_asset.inc"
 
 constexpr std::string_view kDigest =
-    "c44bb9ee7e921021ce95877315e570a39cda184a1ceb23ca6812987ce265d01d";
+    "62bc8f7df98318f1881f0655f07945fb27ac3a3db0dac7aa934532b6c73da563";
 
 }  // namespace
 

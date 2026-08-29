@@ -1025,10 +1025,12 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
                 lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_AUTO);
               }
             } else if (value.type == HostComponentType::kList) {
+              // list is a semantic alias for scroll — same vertical scrolling.
               object = lv_obj_create(parent);
               if (object != nullptr) {
-                lv_obj_set_scrollable(object, false);
-                lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_OFF);
+                lv_obj_set_scrollable(object, true);
+                lv_obj_set_scroll_dir(object, LV_DIR_VER);
+                lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_AUTO);
               }
             } else if (value.type == HostComponentType::kImage) {
               object = lv_image_create(parent);
@@ -1051,7 +1053,8 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
                 value.type == HostComponentType::kList ||
                 value.type == HostComponentType::kScroll) {
               resetViewChrome(object);
-              if (value.type == HostComponentType::kScroll) {
+              if (value.type == HostComponentType::kScroll ||
+                  value.type == HostComponentType::kList) {
                 lv_obj_set_scrollable(object, true);
                 lv_obj_set_scroll_dir(object, LV_DIR_VER);
                 lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_AUTO);
@@ -1064,6 +1067,8 @@ MountResult MountHost::execute(const MountTransaction& transaction) noexcept {
               if (slot.private_label == nullptr) {
                 failure_reason = "button label creation failed";
                 succeeded = false;
+              } else {
+                lv_obj_align(static_cast<lv_obj_t*>(slot.private_label), LV_ALIGN_CENTER, 0, 0);
               }
             } else if (value.type == HostComponentType::kInput) {
               lv_textarea_set_text(object, "");

@@ -97,6 +97,22 @@ if(QUICKAPP_LVGL_BUILD_S02)
     quickapp_lvgl_configure(quickapp_lvgl_font_asset)
   endif()
 
+  add_library(quickapp_lvgl_media STATIC
+    src/media/lvgl_media_adapter.cpp)
+  target_include_directories(quickapp_lvgl_media PUBLIC include)
+  target_link_libraries(quickapp_lvgl_media PUBLIC quickapp_core_foundation)
+  quickapp_lvgl_configure(quickapp_lvgl_media)
+
+  if(QUICKAPP_LVGL_BUILD_TESTS)
+    add_executable(lv_b7_video_unsupported_tests
+      tests/lv_b7_video_unsupported_tests.cpp)
+    target_link_libraries(lv_b7_video_unsupported_tests PRIVATE
+      quickapp_lvgl_media)
+    quickapp_lvgl_configure(lv_b7_video_unsupported_tests)
+    add_test(NAME lv_b7_video_unsupported_tests
+      COMMAND lv_b7_video_unsupported_tests)
+  endif()
+
   if(QUICKAPP_LVGL_BUILD_S03)
     set(LV_BUILD_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h" CACHE FILEPATH
         "LVGL configuration for QuickApp Kit" FORCE)
