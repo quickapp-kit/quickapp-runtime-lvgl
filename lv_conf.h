@@ -5,7 +5,10 @@
 #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_STRING LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_SPRINTF LV_STDLIB_BUILTIN
-#define LV_MEM_SIZE (64U * 1024U)
+// LVGL 工作内存池。桌面模拟器内存充裕, 真机 ESP32-S3 有 8MB Octal PSRAM,
+// 都不需要抠这块。给字形光栅化 + 图片解码留足空间, 保证多页中文/图片渲染
+// 顺畅、不因池紧张而失败。
+#define LV_MEM_SIZE (4U * 1024U * 1024U)
 #define LV_USE_OS LV_OS_NONE
 #define LV_USE_LOG 0
 #define LV_USE_ASSERT_NULL 1

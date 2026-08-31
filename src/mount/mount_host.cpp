@@ -23,7 +23,17 @@ namespace quickapp::lvgl::mount {
 namespace {
 
 constexpr std::int32_t kDefaultFontSize = 16;
-constexpr std::size_t kTinyTtfCacheGlyphCount = 2;
+// TinyTTF 每个字体实例的字形 bitmap 缓存容量(字形数)。
+//
+// 这是一个 LRU count cache。渲染一屏文本时, LVGL 会同时持有(acquire)当前
+// 帧用到的多个字形 bitmap, 渲染刷新前不释放。当"同时在用的不同字形数"超过
+// 该容量时, LRU 找不到可淘汰的条目(都在被引用), lv_cache_acquire_or_create
+// 返回 NULL, 字形拿不到 bitmap 被静默画成缺字方块(tofu)。
+//
+// 取值 2 时中文页面必然大面积 tofu(实测单页并发字形数远超 2)。中文一屏可达
+// 数十个不同字形, 因此取 256 覆盖任意单屏。每个字形 bitmap 仅数百字节~数 KB,
+// 桌面模拟器与 8MB PSRAM 的 ESP32-S3 均可轻松容纳, 换取零 tofu 的顺畅渲染。
+constexpr std::size_t kTinyTtfCacheGlyphCount = 256;
 
 using core::RuntimeError;
 using core::RuntimeErrorCode;

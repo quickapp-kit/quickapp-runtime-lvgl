@@ -18,6 +18,14 @@ hb-subset --no-hinting --unicodes=U+0020-007E \
   --text-file=system-default-cjk-glyphs.txt \
   NotoSansSC-Regular.ttf \
   --output-file=NotoSansSC-Alpha.ttf
+# hb-subset drops the outline-less space glyph (U+0020); add it back so that
+# text containing half-width spaces ("186 kcal", "6 杯") renders correctly
+# instead of showing a missing-glyph box:
+python3 add_space_glyph.py NotoSansSC-Alpha.ttf
+# Regenerate the embedded C byte array and refresh the SHA-256 in
+# ../../src/font/system_default_font_asset.cpp:
+python3 gen_font_inc.py NotoSansSC-Alpha.ttf \
+  ../../src/font/system_default_font_asset.inc
 ```
 
 The font remains licensed under the SIL Open Font License 1.1. The source

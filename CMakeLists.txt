@@ -332,6 +332,14 @@ if(QUICKAPP_LVGL_BUILD_TESTS)
       add_test(NAME lv_s04_font_profile_probe
         COMMAND lv_s04_font_profile_probe)
     endif()
+    # Regression guard: rasterize a full multi-size CJK page while holding all
+    # glyph references; fails (exit 1) if the TinyTTF glyph cache is too small
+    # (the sport-watch tofu bug). Passes only when cache capacity is adequate.
+    add_executable(lv_glyph_cache_probe tests/lv_glyph_cache_probe.cpp)
+    target_link_libraries(lv_glyph_cache_probe PRIVATE
+      quickapp_lvgl_font_asset lvgl::lvgl)
+    quickapp_lvgl_configure(lv_glyph_cache_probe)
+    add_test(NAME lv_glyph_cache_probe COMMAND lv_glyph_cache_probe)
     if(QUICKAPP_LVGL_BUILD_SIMULATOR)
       add_executable(lv_s04_mount_contract_tests tests/lv_s04_mount_contract_tests.cpp)
       target_link_libraries(lv_s04_mount_contract_tests PRIVATE
