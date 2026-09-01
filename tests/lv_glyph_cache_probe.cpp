@@ -65,9 +65,11 @@ int run() {
   const auto bytes = qfont::systemDefaultFontBytes();
   if (bytes.empty()) { std::fprintf(stderr, "PROBE font bytes empty\n"); return 2; }
 
-  // Detail-page glyph set incl. the reported tofu chars 杯/时/小.
+  // Exact Detail-page binding values. Keep spaces and digits here: U+0020
+  // was the original missing glyph and must remain covered by this probe.
   constexpr std::string_view kDetail =
-      "距目标还差步消耗饮水站立小时杯千卡返回运动健康数据统计";
+      "距目标还差 3158 步距目标还差 114 kcal距目标还差 3 小时"
+      "距目标还差 2 杯返回";
 
   // The runtime keeps multiple font instances alive (one per size). Detail
   // page alone uses 18/28/13/12; add 16 as default. All persist while pages
@@ -101,9 +103,19 @@ int run() {
       lv_font_glyph_dsc_t g{};
       if (!lv_font_get_glyph_dsc(f, &g, cp, 0)) {
         std::fprintf(stderr, "PROBE.dsc_miss cp=U+%04X\n", cp);
+        ++tofu;
         continue;
       }
       ++total;
+      if (cp == 0x20U) {
+        if (g.adv_w == 0) {
+          ++tofu;
+          std::fprintf(stderr,
+                       "PROBE.TOFU size=%d cp=U+0020 (zero advance)\n",
+                       static_cast<int>(f->line_height));
+        }
+        continue;
+      }
       const void* bmp = lv_font_get_glyph_bitmap(&g, nullptr);
       if (bmp == nullptr) {
         ++tofu;
