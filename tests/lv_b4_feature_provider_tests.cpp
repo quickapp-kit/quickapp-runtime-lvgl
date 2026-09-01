@@ -49,9 +49,17 @@ void testProvider() {
 
   auto confirm = request(ModuleId::kSystemPrompt, Method::kConfirm,
                          request_id.value(), surface_id.value());
-  confirm.text = "continue";
+  confirm.text = "已返回目标列表";
   const auto confirmed = registry.invoke(confirm);
   assert(confirmed.status == Status::kSuccess && confirmed.confirmed == true);
+  auto* prompt = lv_obj_get_child(lv_screen_active(), 0);
+  assert(prompt != nullptr);
+  const auto* prompt_font = lv_obj_get_style_text_font(prompt, LV_PART_MAIN);
+  assert(prompt_font != nullptr);
+  lv_font_glyph_dsc_t returned_glyph{};
+  assert(lv_font_get_glyph_dsc(prompt_font, &returned_glyph, 0x5DF2, 0));
+  assert(lv_font_get_glyph_bitmap(&returned_glyph, nullptr) != nullptr);
+  lv_font_glyph_release_draw_data(&returned_glyph);
 
   auto prompt_failed = alert;
   prompt_failed.text = "__failed__";

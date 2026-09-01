@@ -8,6 +8,8 @@
 #include <string_view>
 #include <utility>
 
+#include "quickapp/lvgl/font/system_default_font_asset.h"
+
 namespace quickapp::lvgl::feature {
 namespace {
 
@@ -15,6 +17,9 @@ using core::feature::Method;
 using core::feature::ModuleId;
 using core::feature::Result;
 using core::feature::Status;
+
+constexpr std::int32_t kPromptFontSize = 16;
+constexpr std::size_t kPromptFontCacheGlyphCount = 64;
 
 bool isPageMethod(const core::feature::Request& request) noexcept {
   return request.module == ModuleId::kPageHost &&
@@ -25,11 +30,14 @@ bool isPageMethod(const core::feature::Request& request) noexcept {
 }  // namespace
 
 LvglFeatureProvider::~LvglFeatureProvider() {
-  for (const auto& [surface_id, object] : toast_objects_) {
+  for (const auto& [surface_id, resource] : toast_objects_) {
     static_cast<void>(surface_id);
-    if (object != nullptr && lv_obj_is_valid(static_cast<lv_obj_t*>(object))) {
-      lv_obj_delete(static_cast<lv_obj_t*>(object));
+    if (resource.object != nullptr &&
+        lv_obj_is_valid(static_cast<lv_obj_t*>(resource.object))) {
+      lv_obj_delete(static_cast<lv_obj_t*>(resource.object));
     }
+    if (resource.font != nullptr)
+      lv_tiny_ttf_destroy(static_cast<lv_font_t*>(resource.font));
   }
 }
 
@@ -78,14 +86,9 @@ Result LvglFeatureProvider::invokePrompt(
     return failed(request, "PLATFORM_REJECTED", "LVGL display is unavailable");
   }
   destroyToast(request.surface_id.wire());
-  auto* prompt = lv_label_create(static_cast<lv_obj_t*>(parent_object_));
-  if (prompt == nullptr) {
+  if (!createPromptLabel(request.surface_id.wire(), request.text)) {
     return failed(request, "OUT_OF_MEMORY", "prompt object allocation failed");
   }
-  lv_label_set_text(prompt, request.text.c_str());
-  lv_obj_set_width(prompt, LV_SIZE_CONTENT);
-  lv_obj_align(prompt, LV_ALIGN_BOTTOM_MID, 0, -24);
-  toast_objects_[request.surface_id.wire()] = prompt;
   if (request.method == Method::kConfirm) {
     return {request.request_id, request.surface_id, Status::kSuccess,
             std::nullopt, std::nullopt, true, std::nullopt, std::nullopt,
@@ -197,14 +200,9 @@ Result LvglFeatureProvider::invoke(
     if (parent_object_ == nullptr) {
       return failed(request, "PLATFORM_REJECTED", "LVGL display is unavailable");
     }
-    auto* toast = lv_label_create(static_cast<lv_obj_t*>(parent_object_));
-    if (toast == nullptr) {
+    if (!createPromptLabel(request.surface_id.wire(), request.text)) {
       return failed(request, "OUT_OF_MEMORY", "toast object allocation failed");
     }
-    lv_label_set_text(toast, request.text.c_str());
-    lv_obj_set_width(toast, LV_SIZE_CONTENT);
-    lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -24);
-    toast_objects_[request.surface_id.wire()] = toast;
     std::fprintf(stderr,
                  "lvgl.feature.provider module=system.prompt method=showToast status=completed request=%s surface=%s\n",
                  request.request_id.wire().c_str(),
@@ -289,10 +287,34 @@ void LvglFeatureProvider::putPrivateFile(const core::SurfaceId& surface_id,
 void LvglFeatureProvider::destroyToast(const std::string& surface_id) noexcept {
   const auto found = toast_objects_.find(surface_id);
   if (found == toast_objects_.end()) return;
-  if (found->second != nullptr && lv_obj_is_valid(static_cast<lv_obj_t*>(found->second))) {
-    lv_obj_delete(static_cast<lv_obj_t*>(found->second));
+  if (found->second.object != nullptr &&
+      lv_obj_is_valid(static_cast<lv_obj_t*>(found->second.object))) {
+    lv_obj_delete(static_cast<lv_obj_t*>(found->second.object));
   }
+  if (found->second.font != nullptr)
+    lv_tiny_ttf_destroy(static_cast<lv_font_t*>(found->second.font));
   toast_objects_.erase(found);
+}
+
+bool LvglFeatureProvider::createPromptLabel(const std::string& surface_id,
+                                            std::string_view text) noexcept {
+  const auto bytes = font::systemDefaultFontBytes();
+  auto* native_font = lv_tiny_ttf_create_data_ex(
+      bytes.data(), bytes.size(), kPromptFontSize, LV_FONT_KERNING_NONE,
+      kPromptFontCacheGlyphCount);
+  if (native_font == nullptr) return false;
+  auto* label = lv_label_create(static_cast<lv_obj_t*>(parent_object_));
+  if (label == nullptr) {
+    lv_tiny_ttf_destroy(native_font);
+    return false;
+  }
+  const std::string owned_text(text);
+  lv_label_set_text(label, owned_text.c_str());
+  lv_obj_set_style_text_font(label, native_font, 0);
+  lv_obj_set_width(label, LV_SIZE_CONTENT);
+  lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -24);
+  toast_objects_[surface_id] = PromptResource{label, native_font};
+  return true;
 }
 
 void LvglFeatureProvider::teardown(const core::SurfaceId& surface_id) noexcept {
@@ -311,11 +333,14 @@ void LvglFeatureProvider::teardown(const core::SurfaceId& surface_id) noexcept {
 }
 
 void LvglFeatureProvider::clear_resources() noexcept {
-  for (const auto& [surface_id, object] : toast_objects_) {
+  for (const auto& [surface_id, resource] : toast_objects_) {
     static_cast<void>(surface_id);
-    if (object != nullptr && lv_obj_is_valid(static_cast<lv_obj_t*>(object))) {
-      lv_obj_delete(static_cast<lv_obj_t*>(object));
+    if (resource.object != nullptr &&
+        lv_obj_is_valid(static_cast<lv_obj_t*>(resource.object))) {
+      lv_obj_delete(static_cast<lv_obj_t*>(resource.object));
     }
+    if (resource.font != nullptr)
+      lv_tiny_ttf_destroy(static_cast<lv_font_t*>(resource.font));
   }
   toast_objects_.clear();
   titles_.clear();

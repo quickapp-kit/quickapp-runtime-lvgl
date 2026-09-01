@@ -3,6 +3,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <string_view>
 
 #include "quickapp/core/feature/module_registry.h"
 
@@ -33,12 +34,19 @@ class LvglFeatureProvider final : public core::feature::Provider {
                       std::string data) noexcept;
 
  private:
+  struct PromptResource final {
+    void* object{nullptr};
+    void* font{nullptr};
+  };
+
   [[nodiscard]] core::feature::Result failed(
       const core::feature::Request& request, std::string code,
       std::string message) const noexcept;
   [[nodiscard]] core::feature::Result unsupported(
       const core::feature::Request& request) const noexcept;
   void destroyToast(const std::string& surface_id) noexcept;
+  [[nodiscard]] bool createPromptLabel(const std::string& surface_id,
+                                       std::string_view text) noexcept;
   [[nodiscard]] core::feature::Result invokePrompt(
       const core::feature::Request& request) noexcept;
   [[nodiscard]] core::feature::Result invokeFetch(
@@ -49,7 +57,7 @@ class LvglFeatureProvider final : public core::feature::Provider {
                                             const std::string& path);
 
   void* parent_object_{nullptr};
-  std::map<std::string, void*, std::less<>> toast_objects_;
+  std::map<std::string, PromptResource, std::less<>> toast_objects_;
   std::map<std::string, std::string, std::less<>> titles_;
   std::map<std::string, std::string, std::less<>> meta_descriptions_;
   std::map<std::string, std::pair<std::string, std::string>, std::less<>>

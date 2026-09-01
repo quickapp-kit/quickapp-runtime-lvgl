@@ -143,7 +143,8 @@ if(QUICKAPP_LVGL_BUILD_S02)
       src/feature/lvgl_feature_provider.cpp)
     target_include_directories(quickapp_lvgl_feature_provider PUBLIC include)
     target_link_libraries(quickapp_lvgl_feature_provider PUBLIC
-      quickapp_core_features quickapp_lvgl_surface_host lvgl::lvgl)
+      quickapp_core_features quickapp_lvgl_surface_host
+      quickapp_lvgl_font_asset lvgl::lvgl)
     quickapp_lvgl_configure(quickapp_lvgl_feature_provider)
 
     if(QUICKAPP_LVGL_BUILD_TESTS)

@@ -69,7 +69,7 @@ int run() {
   // was the original missing glyph and must remain covered by this probe.
   constexpr std::string_view kDetail =
       "距目标还差 3158 步距目标还差 114 kcal距目标还差 3 小时"
-      "距目标还差 2 杯返回";
+      "距目标还差 2 杯返回✓";
 
   // The runtime keeps multiple font instances alive (one per size). Detail
   // page alone uses 18/28/13/12; add 16 as default. All persist while pages
