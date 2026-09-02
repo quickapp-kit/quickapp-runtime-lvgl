@@ -10,6 +10,11 @@ option(QUICKAPP_LVGL_BUILD_SIMULATOR "Build SDL/libuv simulator backends" ON)
 option(QUICKAPP_LVGL_EMBEDDED_MIN "Build the LVGL runtime without SDL, filesystem, or diagnostics" OFF)
 option(QUICKAPP_LVGL_ENABLE_ASAN "Enable AddressSanitizer and UBSan" OFF)
 option(QUICKAPP_LVGL_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(QUICKAPP_LVGL_BUILD_SHARED_SDK "Build optional shared SDK" OFF)
+
+if(QUICKAPP_LVGL_BUILD_SHARED_SDK)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(QUICKAPP_LVGL_ENABLE_ASAN AND QUICKAPP_LVGL_ENABLE_TSAN)
   message(FATAL_ERROR "ASan/UBSan and TSan must use separate builds")
@@ -147,7 +152,7 @@ if(QUICKAPP_LVGL_BUILD_S02)
       quickapp_lvgl_font_asset lvgl::lvgl)
     quickapp_lvgl_configure(quickapp_lvgl_feature_provider)
 
-    if(QUICKAPP_LVGL_BUILD_TESTS)
+    if(QUICKAPP_LVGL_BUILD_TESTS AND QUICKAPP_LVGL_BUILD_SIMULATOR)
       add_executable(lv_b4_feature_provider_tests
         tests/lv_b4_feature_provider_tests.cpp)
       target_link_libraries(lv_b4_feature_provider_tests PRIVATE
@@ -184,7 +189,7 @@ if(QUICKAPP_LVGL_BUILD_S02)
         quickapp_lvgl_font_asset lvgl::lvgl)
       quickapp_lvgl_configure(quickapp_lvgl_mount_host)
 
-      if(QUICKAPP_LVGL_BUILD_TESTS)
+      if(QUICKAPP_LVGL_BUILD_TESTS AND QUICKAPP_LVGL_BUILD_SIMULATOR)
       add_executable(lv_b35_tabs_mount_tests
           tests/lv_b35_tabs_mount_tests.cpp)
         target_link_libraries(lv_b35_tabs_mount_tests PRIVATE
@@ -238,11 +243,92 @@ if(QUICKAPP_LVGL_BUILD_S02)
       PUBLIC quickapp_lvgl_runtime_host quickapp_lvgl_mount_host PkgConfig::SDL3)
     quickapp_lvgl_configure(quickapp_lvgl_sdl_backends)
   endif()
+
+  if(QUICKAPP_LVGL_BUILD_S03)
+    add_library(quickapp_runtime STATIC
+      src/sdk/runtime_c_api.cpp)
+    target_include_directories(quickapp_runtime PUBLIC include)
+    target_link_libraries(quickapp_runtime PUBLIC
+      quickapp_lvgl_runtime_host
+      quickapp_lvgl_embedded_backends
+      quickapp_lvgl_surface_host
+      quickapp_core_foundation
+      quickapp_core_features
+      quickapp_core_page_ir
+      quickapp_core_package
+      quickapp_core_runtime_tree
+      quickapp_core_lifecycle
+      quickapp_core_surface
+      quickapp_core_render
+      quickapp_js_engine_api
+      quickapp_js_executor
+      quickapp_js_runtime_abi
+      quickapp_js_module_loader
+      quickapp_js_event
+      quickapp_js_static_facades
+      quickapp_js_page_host_control
+      quickapp_js_vm_lifecycle
+      quickapp_js_alpha_initial_binding
+      quickapp_js_alpha_initial_render
+      quickapp_js_alpha_page_stage)
+    if(TARGET quickapp_js_engine_quickjs)
+      target_link_libraries(quickapp_runtime PUBLIC quickapp_js_engine_quickjs)
+    endif()
+    if(TARGET quickapp_lvgl_mount_host)
+      target_link_libraries(quickapp_runtime PUBLIC quickapp_lvgl_mount_host)
+    endif()
+    if(TARGET quickapp_lvgl_feature_provider)
+      target_link_libraries(quickapp_runtime PUBLIC quickapp_lvgl_feature_provider)
+    endif()
+    if(TARGET quickapp_lvgl_font_measure)
+      target_link_libraries(quickapp_runtime PUBLIC quickapp_lvgl_font_measure)
+    endif()
+    set_target_properties(quickapp_runtime PROPERTIES
+      ARCHIVE_OUTPUT_NAME quickapp_runtime)
+    quickapp_lvgl_configure(quickapp_runtime)
+
+    add_executable(quickapp_lvgl_sdk_example
+      examples/embedded_sdk_host.c)
+    set_target_properties(quickapp_lvgl_sdk_example PROPERTIES
+      LINKER_LANGUAGE CXX)
+    target_link_libraries(quickapp_lvgl_sdk_example PRIVATE quickapp_runtime)
+    quickapp_lvgl_configure(quickapp_lvgl_sdk_example)
+
+    if(QUICKAPP_LVGL_BUILD_SHARED_SDK)
+      add_library(quickapp_runtime_shared SHARED
+        src/sdk/runtime_c_api.cpp)
+      target_include_directories(quickapp_runtime_shared PUBLIC include)
+      target_link_libraries(quickapp_runtime_shared PUBLIC quickapp_runtime)
+      set_target_properties(quickapp_runtime_shared PROPERTIES
+        OUTPUT_NAME quickapp_runtime
+        POSITION_INDEPENDENT_CODE ON)
+      quickapp_lvgl_configure(quickapp_runtime_shared)
+      install(TARGETS quickapp_runtime_shared
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
+    endif()
+
+    install(TARGETS quickapp_runtime
+      ARCHIVE DESTINATION lib)
+    install(FILES include/quickapp/lvgl/sdk/runtime.h
+      DESTINATION include/quickapp/lvgl/sdk)
+  endif()
 endif()
 
 if(QUICKAPP_LVGL_BUILD_TESTS)
   enable_testing()
   find_package(Threads REQUIRED)
+
+  if(TARGET quickapp_runtime)
+    add_executable(quickapp_sdk_c_api_tests tests/sdk_c_api_tests.c)
+    set_target_properties(quickapp_sdk_c_api_tests PROPERTIES
+      LINKER_LANGUAGE CXX)
+    target_link_libraries(quickapp_sdk_c_api_tests PRIVATE quickapp_runtime)
+    quickapp_lvgl_configure(quickapp_sdk_c_api_tests)
+    add_test(NAME quickapp_sdk_c_api_tests
+             COMMAND quickapp_sdk_c_api_tests)
+  endif()
 
   add_executable(lv_s01_contract_tests tests/lv_s01_contract_tests.cpp)
   target_link_libraries(lv_s01_contract_tests PRIVATE

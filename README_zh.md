@@ -37,6 +37,31 @@ cmake --build build-embedded
 ctest --test-dir build-embedded --output-on-failure
 ```
 
+### 嵌入式 SDK
+
+SDK 的主入口是 `include/quickapp/lvgl/sdk/runtime.h`，静态库目标为
+`quickapp_runtime`，产物名为 `libquickapp_runtime.a`。公共 ABI 只包含
+不透明 Runtime 句柄、固定宽度整数、长度明确的 buffer、枚举和 typed result；
+不暴露 LVGL、C++、Core 或 JS 类型。
+
+```c
+qak_runtime_t* runtime = NULL;
+qak_runtime_create(&config, &runtime);
+qak_runtime_load_rpk(runtime, &source);
+qak_runtime_attach_surface(runtime, &surface);
+qak_runtime_dispatch_input(runtime, &input);
+qak_runtime_update_lifecycle(runtime, QAK_LIFECYCLE_SURFACE_SHOW);
+qak_runtime_pump(runtime);
+qak_runtime_destroy(runtime);
+```
+
+`qak_runtime_config_t.adapter` 是 Platform Composition Root 的 C ABI 适配边界；
+其实现负责把 typed 调用接入现有 JS Runtime、C++ Core、Runtime Tree、Bridge、
+Render、Event、Router、Lifecycle 和 LVGL owner thread。SDK 不要求动态链接，
+`quickapp_runtime_shared` 仅在支持动态链接的 Linux/桌面环境中按需启用。
+
+`qak_runtime_destroy` 会完成资源释放并消费 Runtime 句柄；调用方不得在销毁后继续使用该句柄。
+
 ### Sanitizer 构建
 
 ```bash
