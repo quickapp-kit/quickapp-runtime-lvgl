@@ -14,5 +14,6 @@ inline constexpr std::int32_t kSystemDefaultFontMaxSize = 256;
 
 [[nodiscard]] std::span<const std::uint8_t> systemDefaultFontBytes() noexcept;
 [[nodiscard]] std::string_view systemDefaultFontDigest() noexcept;
+[[nodiscard]] std::string_view systemDefaultFontProfile() noexcept;
 
 }  // namespace quickapp::lvgl::font

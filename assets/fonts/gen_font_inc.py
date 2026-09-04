@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""从 NotoSansSC-Alpha.ttf 生成 system_default_font_asset.inc (C 字节数组)。
+"""从 LVGL 字体资产生成 system_default_font_asset.inc (C 字节数组)。
 
 保持与原 .inc 完全一致的格式: 头部注释(源名/SHA-256/Size) + 16 字节一行的
 hex 数组 + _len。同时打印 SHA-256 供更新 .cpp 里的 digest 常量。
 
 用法:
-    python3 gen_font_inc.py NotoSansSC-Alpha.ttf ../../src/font/system_default_font_asset.inc
+    python3 gen_font_inc.py NotoSansSC-Common.ttf generated-font/system_default_font_asset.inc common-cjk
 """
 import hashlib
 import sys
 
 
-def main(ttf_path: str, inc_path: str) -> int:
+def main(ttf_path: str, inc_path: str, profile: str = "custom") -> int:
     with open(ttf_path, "rb") as f:
         data = f.read()
 
@@ -32,6 +32,10 @@ def main(ttf_path: str, inc_path: str) -> int:
     lines.append("};")
     lines.append(
         f"static const unsigned int quickapp_system_default_cjk_font_len = {size};")
+    lines.append(
+        f'static constexpr char quickapp_system_default_font_digest[] = "{digest}";')
+    lines.append(
+        f'static constexpr char quickapp_system_default_font_profile[] = "{profile}";')
 
     with open(inc_path, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -43,7 +47,7 @@ def main(ttf_path: str, inc_path: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         print(__doc__)
         sys.exit(2)
-    sys.exit(main(sys.argv[1], sys.argv[2]))
+    sys.exit(main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else "custom"))

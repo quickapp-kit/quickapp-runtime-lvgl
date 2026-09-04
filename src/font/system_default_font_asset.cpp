@@ -3,10 +3,7 @@
 namespace quickapp::lvgl::font {
 namespace {
 
-#include "system_default_font_asset.inc"
-
-constexpr std::string_view kDigest =
-    "7950a42a77d58c3f3afa47a2a0c4b1ab5aca3507aae1eb8015ce55eb4daed507";
+#include <system_default_font_asset.inc>
 
 }  // namespace
 
@@ -15,6 +12,12 @@ std::span<const std::uint8_t> systemDefaultFontBytes() noexcept {
           quickapp_system_default_cjk_font_len};
 }
 
-std::string_view systemDefaultFontDigest() noexcept { return kDigest; }
+std::string_view systemDefaultFontDigest() noexcept {
+  return quickapp_system_default_font_digest;
+}
+
+std::string_view systemDefaultFontProfile() noexcept {
+  return quickapp_system_default_font_profile;
+}
 
 }  // namespace quickapp::lvgl::font

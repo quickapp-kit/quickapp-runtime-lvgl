@@ -12,6 +12,13 @@ option(QUICKAPP_LVGL_ENABLE_ASAN "Enable AddressSanitizer and UBSan" OFF)
 option(QUICKAPP_LVGL_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(QUICKAPP_LVGL_BUILD_SHARED_SDK "Build optional shared SDK" OFF)
 
+set(QUICKAPP_LVGL_FONT_PROFILE "common-cjk" CACHE STRING
+    "LVGL font profile: minimal, common-cjk, full-cjk, or custom")
+set_property(CACHE QUICKAPP_LVGL_FONT_PROFILE PROPERTY STRINGS
+    minimal common-cjk full-cjk custom)
+set(QUICKAPP_LVGL_FONT_ASSET "" CACHE FILEPATH
+    "Pre-subset TTF/OTF asset used by the custom LVGL font profile")
+
 if(QUICKAPP_LVGL_BUILD_SHARED_SDK)
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -96,9 +103,61 @@ if(QUICKAPP_LVGL_BUILD_S02)
   quickapp_lvgl_configure(quickapp_lvgl_embedded_backends)
 
   if(QUICKAPP_LVGL_BUILD_S04 OR QUICKAPP_LVGL_BUILD_S06)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+    set(_quickapp_lvgl_font_profiles minimal common-cjk full-cjk custom)
+    if(NOT QUICKAPP_LVGL_FONT_PROFILE IN_LIST _quickapp_lvgl_font_profiles)
+      message(FATAL_ERROR
+        "Unsupported QUICKAPP_LVGL_FONT_PROFILE='${QUICKAPP_LVGL_FONT_PROFILE}'")
+    endif()
+
+    if(QUICKAPP_LVGL_FONT_PROFILE STREQUAL "minimal")
+      set(_quickapp_lvgl_font_asset
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Alpha.ttf")
+    elseif(QUICKAPP_LVGL_FONT_PROFILE STREQUAL "common-cjk")
+      set(_quickapp_lvgl_font_asset
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/NotoSansSC-Common.ttf")
+    elseif(QUICKAPP_LVGL_FONT_PROFILE STREQUAL "full-cjk")
+      set(_quickapp_lvgl_font_asset
+        "${CMAKE_CURRENT_SOURCE_DIR}/../source/third_party/lvgl/tests/src/test_files/fonts/noto/NotoSansSC-Regular.ttf")
+    else()
+      if(QUICKAPP_LVGL_FONT_ASSET STREQUAL "")
+        message(FATAL_ERROR
+          "QUICKAPP_LVGL_FONT_ASSET is required for the custom font profile")
+      endif()
+      get_filename_component(_quickapp_lvgl_font_asset
+        "${QUICKAPP_LVGL_FONT_ASSET}" ABSOLUTE)
+    endif()
+
+    if(NOT EXISTS "${_quickapp_lvgl_font_asset}")
+      message(FATAL_ERROR
+        "LVGL font asset does not exist: ${_quickapp_lvgl_font_asset}")
+    endif()
+
+    set(_quickapp_lvgl_font_generated_dir
+      "${CMAKE_CURRENT_BINARY_DIR}/generated-font")
+    set(_quickapp_lvgl_font_generated_inc
+      "${_quickapp_lvgl_font_generated_dir}/system_default_font_asset.inc")
+    add_custom_command(
+      OUTPUT "${_quickapp_lvgl_font_generated_inc}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${_quickapp_lvgl_font_generated_dir}"
+      COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/gen_font_inc.py"
+        "${_quickapp_lvgl_font_asset}"
+        "${_quickapp_lvgl_font_generated_inc}"
+        "${QUICKAPP_LVGL_FONT_PROFILE}"
+      DEPENDS
+        "${_quickapp_lvgl_font_asset}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/gen_font_inc.py"
+      VERBATIM)
+    add_custom_target(quickapp_lvgl_font_asset_data
+      DEPENDS "${_quickapp_lvgl_font_generated_inc}")
     add_library(quickapp_lvgl_font_asset STATIC
       src/font/system_default_font_asset.cpp)
-    target_include_directories(quickapp_lvgl_font_asset PUBLIC include)
+    add_dependencies(quickapp_lvgl_font_asset quickapp_lvgl_font_asset_data)
+    target_include_directories(quickapp_lvgl_font_asset PUBLIC include
+      PRIVATE "${_quickapp_lvgl_font_generated_dir}")
     quickapp_lvgl_configure(quickapp_lvgl_font_asset)
   endif()
 
